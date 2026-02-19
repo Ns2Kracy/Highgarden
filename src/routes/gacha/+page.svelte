@@ -1,12 +1,22 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
-  import { get } from 'svelte/store';
-  import { games } from '$lib/stores/games';
-  import { FileDown, Search, Link, RefreshCw, ChevronLeft, ChevronRight, Sparkles, AlertCircle, CheckCircle2 } from 'lucide-svelte';
+  import {
+    FileDown,
+    RefreshCw,
+    ChevronLeft,
+    ChevronRight,
+    LogOut,
+    Phone,
+    Lock,
+    Hash,
+    Loader,
+    CheckCircle2,
+    AlertCircle,
+  } from 'lucide-svelte';
   import type { GameId } from '$lib/types';
 
-  // ─── Local types matching backend ────────────────────────────────────────────
+  // ─── Local types ─────────────────────────────────────────────────────────────
 
   interface GachaRecord {
     id: string;
@@ -48,18 +58,34 @@
     fetchedAt: number;
   }
 
+  interface SessionInfo {
+    phoneMasked: string;
+    uid: string;
+  }
+
   // ─── State ───────────────────────────────────────────────────────────────────
 
   let selectedGame = $state<GameId>('arknights');
-  let phase = $state<'idle' | 'scanning' | 'fetching' | 'done' | 'error'>('idle');
-  let manualUrl = $state('');
-  let showDataPanel = $state(true);
-  let statusMsg = $state('');
-  let statusKind = $state<'info' | 'ok' | 'error'>('info');
 
+  // Auth
+  let session = $state<SessionInfo | null>(null);
+  let loginTab = $state<'password' | 'sms'>('password');
+  let phone = $state('');
+  let password = $state('');
+  let smsCode = $state('');
+  let smsSent = $state(false);
+  let smsCooldown = $state(0); // countdown seconds
+  let authLoading = $state(false);
+  let authError = $state('');
+
+  // Records
   let gachaData = $state<GachaData | null>(null);
   let stats = $state<GachaStats | null>(null);
+  let fetchLoading = $state(false);
+  let fetchMsg = $state('');
+  let fetchOk = $state(false);
 
+  // Table
   let selectedPool = $state<'all' | 'standard' | 'limited' | 'beginner' | 'special'>('all');
   let currentPage = $state(1);
   let exportMenuOpen = $state(false);
@@ -91,60 +117,127 @@
   let hasRecords = $derived(allRecords.length > 0);
 
   let currentPoolStats = $derived(
-    selectedPool === 'all' || !stats
-      ? null
-      : (stats.byPool[selectedPool] ?? null)
+    selectedPool === 'all' || !stats ? null : (stats.byPool[selectedPool] ?? null)
+  );
+
+  let overallSixStarCount = $derived(
+    Object.values(stats?.byPool ?? {}).reduce((s, p) => s + p.sixStarCount, 0)
   );
 
   let overallSixStarRate = $derived(
     stats && stats.totalPulls > 0
-      ? Object.values(stats.byPool)
-          .reduce((s, p) => s + p.sixStarCount, 0) /
-          stats.totalPulls *
-          100
-      : 0
+      ? ((overallSixStarCount / stats.totalPulls) * 100).toFixed(1)
+      : '0.0'
   );
 
   let overallCurrentPity = $derived(
-    stats
-      ? Math.max(...Object.values(stats.byPool).map((p) => p.currentPity), 0)
-      : 0
+    stats ? Math.max(...Object.values(stats.byPool).map((p) => p.currentPity), 0) : 0
   );
 
   let overallAvgPity = $derived(() => {
-    if (!stats) return 0;
+    if (!stats) return '0';
     const pools = Object.values(stats.byPool).filter((p) => p.sixStarCount > 0);
-    if (pools.length === 0) return 0;
-    return +(pools.reduce((s, p) => s + p.avgPity, 0) / pools.length).toFixed(1);
+    if (!pools.length) return '0';
+    return (pools.reduce((s, p) => s + p.avgPity, 0) / pools.length).toFixed(1);
   });
 
   // ─── Lifecycle ───────────────────────────────────────────────────────────────
 
   onMount(async () => {
+    await loadSession();
     await loadLocalData();
   });
 
-  // Reset page when pool changes
   $effect(() => {
     // eslint-disable-next-line @typescript-eslint/no-unused-expressions
     selectedPool;
     currentPage = 1;
   });
 
-  // Reset data panel when switching games
   $effect(() => {
     // eslint-disable-next-line @typescript-eslint/no-unused-expressions
     selectedGame;
     gachaData = null;
     stats = null;
-    manualUrl = '';
-    statusMsg = '';
-    phase = 'idle';
-    showDataPanel = true;
+    fetchMsg = '';
+    fetchOk = false;
     loadLocalData();
   });
 
-  // ─── Actions ─────────────────────────────────────────────────────────────────
+  // ─── Auth actions ─────────────────────────────────────────────────────────────
+
+  async function loadSession() {
+    try {
+      session = await invoke<SessionInfo | null>('get_hypergryph_session');
+    } catch {
+      session = null;
+    }
+  }
+
+  async function loginPassword() {
+    if (!phone.trim() || !password.trim()) return;
+    authLoading = true;
+    authError = '';
+    try {
+      session = await invoke<SessionInfo>('hypergryph_login_password', {
+        phone: phone.trim(),
+        password: password.trim(),
+      });
+      password = '';
+    } catch (e) {
+      authError = String(e);
+    } finally {
+      authLoading = false;
+    }
+  }
+
+  async function sendSms() {
+    if (!phone.trim()) { authError = '请输入手机号'; return; }
+    authLoading = true;
+    authError = '';
+    try {
+      await invoke('hypergryph_send_sms', { phone: phone.trim() });
+      smsSent = true;
+      smsCooldown = 60;
+      const timer = setInterval(() => {
+        smsCooldown -= 1;
+        if (smsCooldown <= 0) clearInterval(timer);
+      }, 1000);
+    } catch (e) {
+      authError = String(e);
+    } finally {
+      authLoading = false;
+    }
+  }
+
+  async function loginBySms() {
+    if (!phone.trim() || !smsCode.trim()) return;
+    authLoading = true;
+    authError = '';
+    try {
+      session = await invoke<SessionInfo>('hypergryph_login_by_code', {
+        phone: phone.trim(),
+        code: smsCode.trim(),
+      });
+      smsCode = '';
+      smsSent = false;
+    } catch (e) {
+      authError = String(e);
+    } finally {
+      authLoading = false;
+    }
+  }
+
+  async function logout() {
+    try {
+      await invoke('hypergryph_logout');
+      session = null;
+    } catch {
+      session = null;
+    }
+  }
+
+  // ─── Gacha fetch ──────────────────────────────────────────────────────────────
 
   async function loadLocalData() {
     try {
@@ -153,62 +246,33 @@
       });
       if (data) {
         gachaData = data;
-        const s = await invoke<GachaStats | null>('get_gacha_stats', { gameId: selectedGame });
-        stats = s;
-        if (data.records.length > 0) {
-          showDataPanel = false;
-        }
+        stats = await invoke<GachaStats | null>('get_gacha_stats', { gameId: selectedGame });
       }
     } catch {
-      // No local data yet — keep showDataPanel = true
+      // No local data yet
     }
   }
 
-  async function scanUrl() {
-    const gameList = get(games);
-    const game = gameList.find((g) => g.id === selectedGame);
-    if (!game?.installPath) {
-      setStatus('请先在游戏库页面设置游戏安装路径', 'error');
-      return;
-    }
-    phase = 'scanning';
-    setStatus('正在扫描游戏缓存文件…', 'info');
+  async function fetchGacha() {
+    fetchLoading = true;
+    fetchMsg = '正在获取记录，请稍候…';
+    fetchOk = false;
     try {
-      const url = await invoke<string | null>('scan_gacha_url', {
+      const result = await invoke<{ uid: string; total: number }>('fetch_gacha_with_login', {
         gameId: selectedGame,
-        installPath: game.installPath,
       });
-      if (url) {
-        manualUrl = url;
-        setStatus('已找到寻访记录链接，请点击「获取记录」', 'ok');
-      } else {
-        setStatus('未能自动找到链接。请先在游戏内打开寻访记录，再重试；或手动粘贴链接', 'error');
-      }
-    } catch (e) {
-      setStatus(`扫描失败：${e}`, 'error');
-    } finally {
-      phase = 'idle';
-    }
-  }
-
-  async function fetchRecords() {
-    if (!manualUrl.trim()) return;
-    phase = 'fetching';
-    setStatus('正在从服务器获取记录（可能需要几十秒）…', 'info');
-    try {
-      const result = await invoke<{ uid: string; total: number }>('fetch_gacha_records', {
-        gameId: selectedGame,
-        url: manualUrl.trim(),
-      });
-      setStatus(`获取完成：共 ${result.total} 条记录（UID ${result.uid}）`, 'ok');
+      fetchMsg = `获取完成：共 ${result.total} 条记录（UID ${result.uid}）`;
+      fetchOk = true;
       await loadLocalData();
-      phase = 'done';
-      if (result.total > 0) showDataPanel = false;
     } catch (e) {
-      setStatus(`获取失败：${e}`, 'error');
-      phase = 'error';
+      fetchMsg = String(e);
+      fetchOk = false;
+    } finally {
+      fetchLoading = false;
     }
   }
+
+  // ─── Export ───────────────────────────────────────────────────────────────────
 
   async function doExport(format: string) {
     exportMenuOpen = false;
@@ -220,16 +284,15 @@
         format,
         destPath: path,
       });
-      setStatus(`已导出为 ${path.split('\\').pop() ?? path}`, 'ok');
+      fetchMsg = `已导出至 ${path.split('\\').pop() ?? path}`;
+      fetchOk = true;
     } catch (e) {
-      setStatus(`导出失败：${e}`, 'error');
+      fetchMsg = String(e);
+      fetchOk = false;
     }
   }
 
-  function setStatus(msg: string, kind: 'info' | 'ok' | 'error') {
-    statusMsg = msg;
-    statusKind = kind;
-  }
+  // ─── Helpers ─────────────────────────────────────────────────────────────────
 
   function rarityStars(n: number) {
     return '★'.repeat(Math.min(n, 6));
@@ -243,23 +306,6 @@
       hour: '2-digit',
       minute: '2-digit',
     });
-  }
-
-  function poolLabel(key: string) {
-    const map: Record<string, string> = {
-      all: '全部',
-      standard: '标准',
-      limited: '限定',
-      beginner: '新手',
-      special: '特殊',
-    };
-    return map[key] ?? key;
-  }
-
-  function activeStats(pool: string): PoolStats | null {
-    if (!stats) return null;
-    if (pool === 'all') return null;
-    return stats.byPool[pool] ?? null;
   }
 </script>
 
@@ -290,10 +336,14 @@
         </button>
       </div>
 
-      <!-- Refresh / re-fetch -->
-      {#if hasRecords}
-        <button class="btn-icon" title="重新获取记录" onclick={() => (showDataPanel = !showDataPanel)}>
-          <RefreshCw size={15} />
+      {#if session && hasRecords}
+        <button
+          class="btn-icon"
+          title="刷新记录"
+          disabled={fetchLoading}
+          onclick={fetchGacha}
+        >
+          <RefreshCw size={14} class={fetchLoading ? 'spin' : ''} />
         </button>
       {/if}
 
@@ -305,8 +355,8 @@
           disabled={!hasRecords}
           onclick={() => (exportMenuOpen = !exportMenuOpen)}
         >
-          <FileDown size={15} />
-          <span>导出记录</span>
+          <FileDown size={14} />
+          <span>导出</span>
         </button>
         {#if exportMenuOpen}
           <div class="export-menu">
@@ -319,79 +369,170 @@
     </div>
   </div>
 
-  <!-- ── Data source panel ── -->
-  {#if showDataPanel}
-    <div class="data-panel">
-      <div class="data-panel-title">
-        <Sparkles size={15} />
-        <span>获取寻访记录</span>
-      </div>
-      <p class="data-panel-hint">
-        请先在游戏内打开「寻访记录」页面（保持开着），再点击自动扫描；或直接粘贴游戏内置浏览器地址栏的链接。
-      </p>
+  <!-- ── Auth / login section ── -->
+  {#if !session}
+    <div class="auth-card">
+      <div class="auth-title">登录鹰角通行证</div>
+      <p class="auth-hint">登录后可直接获取寻访记录，无需手动操作</p>
 
-      <div class="scan-row">
+      <!-- Login method tabs -->
+      <div class="login-tabs">
         <button
-          class="btn-scan"
-          class:loading={phase === 'scanning'}
-          disabled={phase === 'scanning' || phase === 'fetching'}
-          onclick={scanUrl}
+          class="login-tab"
+          class:active={loginTab === 'password'}
+          onclick={() => { loginTab = 'password'; authError = ''; }}
         >
-          <Search size={14} />
-          <span>{phase === 'scanning' ? '扫描中…' : '自动扫描'}</span>
+          密码登录
         </button>
-        <span class="scan-sep">或</span>
-        <div class="url-input-wrap">
-          <Link size={13} class="url-icon" />
+        <button
+          class="login-tab"
+          class:active={loginTab === 'sms'}
+          onclick={() => { loginTab = 'sms'; authError = ''; }}
+        >
+          验证码登录
+        </button>
+      </div>
+
+      <div class="login-form">
+        <!-- Phone -->
+        <div class="field">
+          <div class="field-icon"><Phone size={14} /></div>
           <input
-            class="url-input"
-            type="text"
-            placeholder="粘贴寻访记录链接…"
-            bind:value={manualUrl}
-            onkeydown={(e) => e.key === 'Enter' && fetchRecords()}
+            class="field-input"
+            type="tel"
+            placeholder="手机号码"
+            bind:value={phone}
+            maxlength={11}
           />
         </div>
-        <button
-          class="btn-fetch"
-          disabled={!manualUrl.trim() || phase === 'fetching' || phase === 'scanning'}
-          onclick={fetchRecords}
-        >
-          {phase === 'fetching' ? '获取中…' : '获取记录'}
-        </button>
+
+        {#if loginTab === 'password'}
+          <!-- Password -->
+          <div class="field">
+            <div class="field-icon"><Lock size={14} /></div>
+            <input
+              class="field-input"
+              type="password"
+              placeholder="账号密码"
+              bind:value={password}
+              onkeydown={(e) => e.key === 'Enter' && loginPassword()}
+            />
+          </div>
+
+          <button
+            class="btn-login"
+            disabled={authLoading || !phone.trim() || !password.trim()}
+            onclick={loginPassword}
+          >
+            {#if authLoading}
+              <Loader size={14} class="spin" />
+              <span>登录中…</span>
+            {:else}
+              <span>登录</span>
+            {/if}
+          </button>
+        {:else}
+          <!-- SMS code -->
+          <div class="field">
+            <div class="field-icon"><Hash size={14} /></div>
+            <input
+              class="field-input"
+              type="text"
+              placeholder="短信验证码"
+              bind:value={smsCode}
+              maxlength={6}
+              onkeydown={(e) => e.key === 'Enter' && loginBySms()}
+            />
+            <button
+              class="btn-send-sms"
+              disabled={authLoading || smsCooldown > 0 || !phone.trim()}
+              onclick={sendSms}
+            >
+              {smsCooldown > 0 ? `${smsCooldown}s` : '发送'}
+            </button>
+          </div>
+
+          <button
+            class="btn-login"
+            disabled={authLoading || !phone.trim() || !smsCode.trim()}
+            onclick={loginBySms}
+          >
+            {#if authLoading}
+              <Loader size={14} class="spin" />
+              <span>登录中…</span>
+            {:else}
+              <span>登录</span>
+            {/if}
+          </button>
+        {/if}
+
+        {#if authError}
+          <div class="auth-error">
+            <AlertCircle size={13} />
+            <span>{authError}</span>
+          </div>
+        {/if}
       </div>
 
-      {#if statusMsg}
-        <div class="status-msg" class:ok={statusKind === 'ok'} class:error={statusKind === 'error'}>
-          {#if statusKind === 'ok'}
-            <CheckCircle2 size={13} />
-          {:else if statusKind === 'error'}
-            <AlertCircle size={13} />
+      <p class="auth-note">
+        账号密码仅用于向鹰角服务器验证身份，本地只保存会话令牌，不存储密码。
+      </p>
+    </div>
+  {:else}
+    <!-- ── Logged-in action card ── -->
+    <div class="session-card">
+      <div class="session-info">
+        <div class="session-phone">{session.phoneMasked}</div>
+        <div class="session-uid">UID {session.uid}</div>
+      </div>
+      <div class="session-actions">
+        <button
+          class="btn-fetch-main"
+          disabled={fetchLoading}
+          onclick={fetchGacha}
+        >
+          {#if fetchLoading}
+            <Loader size={14} class="spin" />
+            <span>获取中…</span>
+          {:else}
+            <RefreshCw size={14} />
+            <span>{hasRecords ? '刷新记录' : '获取记录'}</span>
           {/if}
-          <span>{statusMsg}</span>
-        </div>
+        </button>
+        <button class="btn-logout" onclick={logout} title="退出登录">
+          <LogOut size={14} />
+        </button>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Fetch status message -->
+  {#if fetchMsg}
+    <div class="fetch-status" class:ok={fetchOk} class:error={!fetchOk && !fetchLoading}>
+      {#if fetchOk}
+        <CheckCircle2 size={13} />
+      {:else if !fetchLoading}
+        <AlertCircle size={13} />
       {/if}
+      <span>{fetchMsg}</span>
     </div>
   {/if}
 
   {#if hasRecords}
-    <!-- ── Overview stats ── -->
+    <!-- ── Stats grid ── -->
     <div class="stats-grid">
       <div class="stat-card">
-        <div class="stat-label">总计</div>
+        <div class="stat-label">总抽数</div>
         <div class="stat-value">{stats?.totalPulls.toLocaleString() ?? 0}</div>
         <div class="stat-sub">次寻访</div>
       </div>
       <div class="stat-card accent">
         <div class="stat-label">六星出货率</div>
         <div class="stat-value">
-          {currentPoolStats
-            ? currentPoolStats.sixStarRate.toFixed(1)
-            : overallSixStarRate.toFixed(1)}%
+          {currentPoolStats ? currentPoolStats.sixStarRate.toFixed(1) : overallSixStarRate}%
         </div>
         <div class="stat-sub">
-          {currentPoolStats
-            ? `${currentPoolStats.sixStarCount} 个六星`
-            : `${Object.values(stats?.byPool ?? {}).reduce((s, p) => s + p.sixStarCount, 0)} 个六星`}
+          {currentPoolStats ? currentPoolStats.sixStarCount : overallSixStarCount} 个六星
         </div>
       </div>
       <div class="stat-card">
@@ -408,16 +549,16 @@
       <div class="stat-card">
         <div class="stat-label">平均出金抽数</div>
         <div class="stat-value">
-          {currentPoolStats ? currentPoolStats.avgPity.toFixed(1) : overallAvgPity().toFixed(1)}
+          {currentPoolStats ? currentPoolStats.avgPity.toFixed(1) : overallAvgPity()}
         </div>
         <div class="stat-sub">抽 / 六星</div>
       </div>
     </div>
 
-    <!-- ── Pool sub-stats ── -->
+    <!-- Pool sub-stats bar -->
     {#if selectedPool !== 'all' && currentPoolStats}
       <div class="pool-detail">
-        <span class="pd-item"><span class="pd-key">总抽数</span>{currentPoolStats.totalPulls}</span>
+        <span class="pd-item"><span class="pd-key">总抽</span>{currentPoolStats.totalPulls}</span>
         <span class="pd-sep">·</span>
         <span class="pd-item"><span class="pd-key">六星</span>{currentPoolStats.sixStarCount}</span>
         <span class="pd-sep">·</span>
@@ -479,7 +620,6 @@
           </tbody>
         </table>
 
-        <!-- Pagination -->
         {#if totalPages > 1}
           <div class="pagination">
             <button
@@ -504,18 +644,16 @@
 
     {#if stats?.uid}
       <div class="footer-info">
-        UID {stats.uid} · 最后更新 {formatDate(stats.fetchedAt)}
+        UID {stats.uid} · 最后同步 {formatDate(stats.fetchedAt)}
       </div>
     {/if}
-  {:else if !showDataPanel}
+  {:else if session}
     <div class="empty-state">
-      <Sparkles size={40} strokeWidth={1} />
-      <p>暂无记录，请点击右上角刷新图标获取</p>
+      <p>点击「获取记录」从服务器同步寻访历史</p>
     </div>
   {/if}
 </div>
 
-<!-- Close export menu on outside click -->
 {#if exportMenuOpen}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -529,7 +667,7 @@
     display: flex;
     flex-direction: column;
     padding: 28px 32px 16px;
-    gap: 16px;
+    gap: 14px;
     overflow-y: auto;
   }
 
@@ -599,21 +737,21 @@
     transition: all 0.15s;
   }
 
-  .btn-icon:hover {
+  .btn-icon:not(:disabled):hover {
     color: var(--color-text-primary);
     border-color: var(--color-accent);
   }
 
+  .btn-icon:disabled { opacity: 0.4; cursor: not-allowed; }
+
   /* ─── Export ─────────────────────────────────────────────────────────────── */
-  .export-wrap {
-    position: relative;
-  }
+  .export-wrap { position: relative; }
 
   .btn-export {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 14px;
+    padding: 6px 12px;
     background: var(--color-bg-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
@@ -629,10 +767,7 @@
     color: var(--color-accent);
   }
 
-  .btn-export.disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
+  .btn-export.disabled { opacity: 0.4; cursor: not-allowed; }
 
   .export-menu {
     position: absolute;
@@ -643,7 +778,7 @@
     border-radius: var(--radius-md);
     padding: 4px;
     z-index: 100;
-    min-width: 140px;
+    min-width: 130px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   }
 
@@ -652,7 +787,7 @@
     width: 100%;
     padding: 7px 12px;
     text-align: left;
-    font-size: 13px;
+    font-size: 12px;
     font-family: var(--font-ui);
     color: var(--color-text-secondary);
     background: transparent;
@@ -667,73 +802,64 @@
     color: var(--color-text-primary);
   }
 
-  /* ─── Data source panel ──────────────────────────────────────────────────── */
-  .data-panel {
+  /* ─── Auth card ──────────────────────────────────────────────────────────── */
+  .auth-card {
     background: var(--color-bg-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);
-    padding: 20px 24px;
+    padding: 24px 28px;
     flex-shrink: 0;
+    max-width: 420px;
+    align-self: center;
+    width: 100%;
   }
 
-  .data-panel-title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 14px;
-    font-weight: 600;
+  .auth-title {
+    font-size: 15px;
+    font-weight: 700;
     color: var(--color-text-primary);
-    margin-bottom: 8px;
+    margin-bottom: 6px;
   }
 
-  .data-panel-hint {
+  .auth-hint {
     font-size: 12px;
     color: var(--color-text-muted);
-    line-height: 1.6;
-    margin-bottom: 16px;
+    margin-bottom: 18px;
+    line-height: 1.5;
   }
 
-  .scan-row {
+  .login-tabs {
     display: flex;
-    align-items: center;
+    gap: 0;
+    border-bottom: 1px solid var(--color-border);
+    margin-bottom: 18px;
+  }
+
+  .login-tab {
+    padding: 6px 16px;
+    font-size: 13px;
+    font-family: var(--font-ui);
+    color: var(--color-text-muted);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .login-tab.active {
+    color: var(--color-accent);
+    border-bottom-color: var(--color-accent);
+  }
+
+  .login-form {
+    display: flex;
+    flex-direction: column;
     gap: 10px;
   }
 
-  .btn-scan {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 7px 16px;
-    background: var(--color-bg-elevated);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    color: var(--color-text-secondary);
-    font-size: 13px;
-    font-family: var(--font-ui);
-    cursor: pointer;
-    transition: all 0.15s;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-
-  .btn-scan:not(:disabled):hover {
-    border-color: var(--color-accent);
-    color: var(--color-accent);
-  }
-
-  .btn-scan:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .scan-sep {
-    font-size: 12px;
-    color: var(--color-text-muted);
-    flex-shrink: 0;
-  }
-
-  .url-input-wrap {
-    flex: 1;
+  .field {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -741,73 +867,182 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
     padding: 0 12px;
-    min-width: 0;
+    transition: border-color 0.15s;
   }
 
-  .url-input-wrap :global(.url-icon) {
+  .field:focus-within {
+    border-color: var(--color-accent);
+  }
+
+  .field-icon {
     color: var(--color-text-muted);
+    display: flex;
+    align-items: center;
     flex-shrink: 0;
   }
 
-  .url-input {
+  .field-input {
     flex: 1;
     background: transparent;
     border: none;
     outline: none;
     color: var(--color-text-primary);
-    font-size: 12px;
-    font-family: var(--font-mono);
-    padding: 8px 0;
+    font-size: 13px;
+    font-family: var(--font-ui);
+    padding: 10px 0;
     min-width: 0;
   }
 
-  .url-input::placeholder {
-    color: var(--color-text-muted);
+  .field-input::placeholder { color: var(--color-text-muted); }
+
+  .btn-send-sms {
+    padding: 4px 10px;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-secondary);
+    font-size: 11px;
     font-family: var(--font-ui);
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: all 0.15s;
   }
 
-  .btn-fetch {
-    padding: 7px 18px;
+  .btn-send-sms:not(:disabled):hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
+
+  .btn-send-sms:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .btn-login {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px;
+    background: var(--color-accent);
+    border: none;
+    border-radius: var(--radius-md);
+    color: #0d0e14;
+    font-size: 14px;
+    font-weight: 700;
+    font-family: var(--font-ui);
+    cursor: pointer;
+    margin-top: 4px;
+    transition: opacity 0.15s;
+  }
+
+  .btn-login:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .auth-error {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #f87171;
+    padding: 2px 0;
+  }
+
+  .auth-note {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    margin-top: 14px;
+    line-height: 1.5;
+    padding-top: 12px;
+    border-top: 1px solid var(--color-border);
+  }
+
+  /* ─── Session card (logged-in) ───────────────────────────────────────────── */
+  .session-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 20px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    flex-shrink: 0;
+  }
+
+  .session-info {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .session-phone {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    font-family: var(--font-mono);
+  }
+
+  .session-uid {
+    font-size: 12px;
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .session-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .btn-fetch-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 20px;
     background: var(--color-accent);
     border: none;
     border-radius: var(--radius-md);
     color: #0d0e14;
     font-size: 13px;
-    font-weight: 600;
+    font-weight: 700;
     font-family: var(--font-ui);
     cursor: pointer;
-    white-space: nowrap;
-    flex-shrink: 0;
     transition: opacity 0.15s;
   }
 
-  .btn-fetch:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
+  .btn-fetch-main:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .btn-logout {
+    width: 34px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all 0.15s;
   }
 
-  .status-msg {
+  .btn-logout:hover { color: #f87171; border-color: #f87171; }
+
+  /* ─── Fetch status ───────────────────────────────────────────────────────── */
+  .fetch-status {
     display: flex;
     align-items: center;
     gap: 6px;
-    margin-top: 12px;
     font-size: 12px;
     color: var(--color-text-muted);
+    flex-shrink: 0;
   }
 
-  .status-msg.ok {
-    color: #4ade80;
-  }
-
-  .status-msg.error {
-    color: #f87171;
-  }
+  .fetch-status.ok { color: #4ade80; }
+  .fetch-status.error { color: #f87171; }
 
   /* ─── Stats grid ─────────────────────────────────────────────────────────── */
   .stats-grid {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
-    gap: 12px;
+    gap: 10px;
     flex-shrink: 0;
   }
 
@@ -815,7 +1050,7 @@
     background: var(--color-bg-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);
-    padding: 16px 20px;
+    padding: 14px 18px;
   }
 
   .stat-card.accent {
@@ -824,7 +1059,7 @@
   }
 
   .stat-label {
-    font-size: 11px;
+    font-size: 10px;
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -832,7 +1067,7 @@
   }
 
   .stat-value {
-    font-size: 28px;
+    font-size: 26px;
     font-weight: 700;
     color: var(--color-text-primary);
     font-family: var(--font-mono);
@@ -840,29 +1075,18 @@
     margin-bottom: 4px;
   }
 
-  .stat-card.accent .stat-value {
-    color: var(--color-accent);
-  }
+  .stat-card.accent .stat-value { color: var(--color-accent); }
+  .stat-value.pity-warn { color: #fbbf24; }
+  .stat-value.pity-danger { color: #f87171; }
 
-  .stat-value.pity-warn {
-    color: #fbbf24;
-  }
-
-  .stat-value.pity-danger {
-    color: #f87171;
-  }
-
-  .stat-sub {
-    font-size: 11px;
-    color: var(--color-text-muted);
-  }
+  .stat-sub { font-size: 11px; color: var(--color-text-muted); }
 
   /* ─── Pool detail bar ────────────────────────────────────────────────────── */
   .pool-detail {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 10px 16px;
+    padding: 8px 16px;
     background: var(--color-bg-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
@@ -870,27 +1094,12 @@
     flex-shrink: 0;
   }
 
-  .pd-item {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    color: var(--color-text-secondary);
-  }
-
-  .pd-key {
-    color: var(--color-text-muted);
-  }
-
-  .pd-sep {
-    color: var(--color-border);
-  }
+  .pd-item { display: flex; align-items: center; gap: 4px; color: var(--color-text-secondary); }
+  .pd-key { color: var(--color-text-muted); }
+  .pd-sep { color: var(--color-border); }
 
   /* ─── Pool tabs ──────────────────────────────────────────────────────────── */
-  .pool-tabs {
-    display: flex;
-    gap: 4px;
-    flex-shrink: 0;
-  }
+  .pool-tabs { display: flex; gap: 4px; flex-shrink: 0; }
 
   .pool-tab {
     display: flex;
@@ -907,29 +1116,18 @@
     transition: all 0.15s;
   }
 
-  .pool-tab:hover {
-    color: var(--color-text-secondary);
-    background: var(--color-bg-surface);
-  }
-
-  .pool-tab.active {
-    background: var(--color-bg-surface);
-    border-color: var(--color-border);
-    color: var(--color-accent);
-  }
+  .pool-tab:hover { color: var(--color-text-secondary); background: var(--color-bg-surface); }
+  .pool-tab.active { background: var(--color-bg-surface); border-color: var(--color-border); color: var(--color-accent); }
 
   .tab-count {
-    font-size: 11px;
-    padding: 1px 6px;
+    font-size: 10px;
+    padding: 1px 5px;
     background: var(--color-bg-elevated);
     border-radius: 10px;
     color: var(--color-text-muted);
   }
 
-  .pool-tab.active .tab-count {
-    background: rgba(232, 201, 122, 0.15);
-    color: var(--color-accent);
-  }
+  .pool-tab.active .tab-count { background: rgba(232, 201, 122, 0.15); color: var(--color-accent); }
 
   /* ─── Record table ───────────────────────────────────────────────────────── */
   .records-wrap {
@@ -943,16 +1141,12 @@
     overflow: hidden;
   }
 
-  .records-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-  }
+  .records-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 
   .records-table th {
-    padding: 10px 14px;
+    padding: 9px 14px;
     text-align: left;
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 600;
     color: var(--color-text-muted);
     text-transform: uppercase;
@@ -963,68 +1157,29 @@
   }
 
   .records-table td {
-    padding: 7px 14px;
+    padding: 6px 14px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.03);
     color: var(--color-text-secondary);
   }
 
-  .records-table tr:last-child td {
-    border-bottom: none;
-  }
+  .records-table tr:last-child td { border-bottom: none; }
+  .records-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
 
-  .records-table tr:hover td {
-    background: rgba(255, 255, 255, 0.02);
-  }
-
-  /* Rarity row coloring */
   .records-table tr.r6 td { color: var(--color-text-primary); }
   .records-table tr.r6 .td-name { color: #f59e0b; font-weight: 600; }
   .records-table tr.r6 .td-rarity { color: #f59e0b; }
-
   .records-table tr.r5 .td-name { color: #a78bfa; }
   .records-table tr.r5 .td-rarity { color: #a78bfa; }
-
   .records-table tr.r4 .td-name { color: #60a5fa; }
   .records-table tr.r4 .td-rarity { color: #60a5fa; }
-
   .records-table tr.r3 td { color: var(--color-text-muted); }
 
-  .td-time {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    white-space: nowrap;
-  }
-
-  .td-pool {
-    max-width: 160px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--color-text-muted);
-    font-size: 11px;
-  }
-
-  .td-rarity {
-    font-size: 11px;
-    letter-spacing: -1px;
-    white-space: nowrap;
-  }
-
-  .td-pity {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    text-align: center;
-  }
-
-  .td-pity.high-pity {
-    color: #fbbf24;
-  }
-
-  .td-new {
-    text-align: center;
-    color: #4ade80;
-    font-size: 11px;
-  }
+  .td-time { font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
+  .td-pool { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-muted); font-size: 11px; }
+  .td-rarity { font-size: 10px; letter-spacing: -1px; white-space: nowrap; }
+  .td-pity { font-family: var(--font-mono); font-size: 12px; text-align: center; }
+  .td-pity.high-pity { color: #fbbf24; }
+  .td-new { text-align: center; color: #4ade80; font-size: 11px; }
 
   /* ─── Pagination ─────────────────────────────────────────────────────────── */
   .pagination {
@@ -1032,14 +1187,14 @@
     align-items: center;
     justify-content: center;
     gap: 12px;
-    padding: 10px;
+    padding: 8px;
     border-top: 1px solid var(--color-border);
     flex-shrink: 0;
   }
 
   .pg-btn {
-    width: 28px;
-    height: 28px;
+    width: 26px;
+    height: 26px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1051,21 +1206,9 @@
     transition: all 0.15s;
   }
 
-  .pg-btn:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-
-  .pg-btn:not(:disabled):hover {
-    border-color: var(--color-accent);
-    color: var(--color-accent);
-  }
-
-  .pg-info {
-    font-size: 12px;
-    color: var(--color-text-muted);
-    font-family: var(--font-mono);
-  }
+  .pg-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .pg-btn:not(:disabled):hover { border-color: var(--color-accent); color: var(--color-accent); }
+  .pg-info { font-size: 12px; color: var(--color-text-muted); font-family: var(--font-mono); }
 
   /* ─── Misc ───────────────────────────────────────────────────────────────── */
   .empty-pool {
@@ -1081,12 +1224,9 @@
   .empty-state {
     flex: 1;
     display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 12px;
     color: var(--color-text-muted);
-    opacity: 0.4;
     font-size: 13px;
   }
 
@@ -1095,12 +1235,16 @@
     color: var(--color-text-muted);
     text-align: center;
     flex-shrink: 0;
-    padding-bottom: 4px;
   }
 
-  .overlay {
-    position: fixed;
-    inset: 0;
-    z-index: 99;
+  .overlay { position: fixed; inset: 0; z-index: 99; }
+
+  /* ─── Spinner animation ──────────────────────────────────────────────────── */
+  :global(.spin) {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
   }
 </style>

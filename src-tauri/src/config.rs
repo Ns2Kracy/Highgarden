@@ -35,6 +35,20 @@ pub struct AppConfig {
     /// game_id → install path
     #[serde(default)]
     pub game_paths: HashMap<String, String>,
+    /// Persisted Hypergryph account session (shared across games)
+    #[serde(default)]
+    pub hypergryph_session: Option<HypergryphSession>,
+}
+
+/// Account-level session token from as.hypergryph.com.
+/// Only the token (not password) is persisted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HypergryphSession {
+    /// e.g. "138****0000" — never store the full number
+    pub phone_masked: String,
+    pub uid: String,
+    pub token: String,
 }
 
 // ─── Persistence ──────────────────────────────────────────────────────────────

@@ -689,6 +689,186 @@ pub async fn select_gacha_export_path(
     Ok(path.map(|p| p.to_string()))
 }
 
+// ─── Hypergryph account auth ──────────────────────────────────────────────────
+
+use crate::gacha::auth;
+use crate::config::HypergryphSession;
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HyperSessionInfo {
+    pub phone_masked: String,
+    pub uid: String,
+}
+
+/// Return the currently stored session (if any), without the raw token.
+#[tauri::command]
+pub async fn get_hypergryph_session(
+    config: State<'_, Arc<RwLock<crate::config::AppConfig>>>,
+) -> Result<Option<HyperSessionInfo>, String> {
+    let c = config.read().await;
+    Ok(c.hypergryph_session.as_ref().map(|s| HyperSessionInfo {
+        phone_masked: s.phone_masked.clone(),
+        uid: s.uid.clone(),
+    }))
+}
+
+/// Login with phone + password, persist session token.
+#[tauri::command]
+pub async fn hypergryph_login_password(
+    phone: String,
+    password: String,
+    app: AppHandle,
+    config: State<'_, Arc<RwLock<crate::config::AppConfig>>>,
+    state: State<'_, Arc<RwLock<AppState>>>,
+) -> Result<HyperSessionInfo, String> {
+    let client = state.read().await.http_client.clone();
+    let (uid, token, _token_type) = auth::login_by_password(&phone, &password, &client)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let session = HypergryphSession {
+        phone_masked: auth::mask_phone(&phone),
+        uid: uid.clone(),
+        token,
+    };
+    let info = HyperSessionInfo {
+        phone_masked: session.phone_masked.clone(),
+        uid: uid.clone(),
+    };
+
+    {
+        let mut c = config.write().await;
+        c.hypergryph_session = Some(session);
+    }
+    let c = config.read().await.clone();
+    crate::config::save_config(&app, &c)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(info)
+}
+
+/// Send an SMS verification code to the given phone number.
+#[tauri::command]
+pub async fn hypergryph_send_sms(
+    phone: String,
+    state: State<'_, Arc<RwLock<AppState>>>,
+) -> Result<(), String> {
+    let client = state.read().await.http_client.clone();
+    auth::send_sms_code(&phone, &client)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Login with phone + SMS code, persist session token.
+#[tauri::command]
+pub async fn hypergryph_login_by_code(
+    phone: String,
+    code: String,
+    app: AppHandle,
+    config: State<'_, Arc<RwLock<crate::config::AppConfig>>>,
+    state: State<'_, Arc<RwLock<AppState>>>,
+) -> Result<HyperSessionInfo, String> {
+    let client = state.read().await.http_client.clone();
+    let (uid, token, _) = auth::login_by_code(&phone, &code, &client)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let session = HypergryphSession {
+        phone_masked: auth::mask_phone(&phone),
+        uid: uid.clone(),
+        token,
+    };
+    let info = HyperSessionInfo {
+        phone_masked: session.phone_masked.clone(),
+        uid: uid.clone(),
+    };
+
+    {
+        let mut c = config.write().await;
+        c.hypergryph_session = Some(session);
+    }
+    let c = config.read().await.clone();
+    crate::config::save_config(&app, &c)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(info)
+}
+
+/// Clear the stored session (logout).
+#[tauri::command]
+pub async fn hypergryph_logout(
+    app: AppHandle,
+    config: State<'_, Arc<RwLock<crate::config::AppConfig>>>,
+) -> Result<(), String> {
+    {
+        let mut c = config.write().await;
+        c.hypergryph_session = None;
+    }
+    let c = config.read().await.clone();
+    crate::config::save_config(&app, &c)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// One-shot command: exchange the stored auth token for a game grant,
+/// then fetch and persist all gacha records. Returns fetch stats.
+#[tauri::command]
+pub async fn fetch_gacha_with_login(
+    game_id: String,
+    app: AppHandle,
+    config: State<'_, Arc<RwLock<crate::config::AppConfig>>>,
+    state: State<'_, Arc<RwLock<AppState>>>,
+) -> Result<FetchGachaResult, String> {
+    let (uid, auth_token) = {
+        let c = config.read().await;
+        let s = c
+            .hypergryph_session
+            .as_ref()
+            .ok_or("未登录鹰角账号，请先登录")?;
+        (s.uid.clone(), s.token.clone())
+    };
+
+    let client = state.read().await.http_client.clone();
+
+    // Get a fresh game-specific grant token
+    let grant = auth::get_game_grant(&game_id, &auth_token, &client)
+        .await
+        .map_err(|e| format!("获取游戏授权失败（登录可能已过期）：{e}"))?;
+
+    let gacha_url = auth::build_gacha_url(&game_id, &grant, &uid);
+
+    // Fetch all records
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let mgr = GachaManager::new(data_dir, client);
+
+    let (fetched_uid, records) = mgr
+        .fetch_all_records(&game_id, &gacha_url)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let total = records.len();
+    let fetched_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    mgr.save_data(&crate::gacha::GachaData {
+        uid: fetched_uid.clone(),
+        game_id,
+        records,
+        fetched_at,
+    })
+    .map_err(|e| e.to_string())?;
+
+    Ok(FetchGachaResult {
+        uid: fetched_uid,
+        total,
+    })
+}
+
 /// Synchronously extract a zip archive into `dest_dir` and delete the archive on success.
 fn extract_zip_sync(zip_path: &str, dest_dir: &str) -> anyhow::Result<()> {
     use std::io;

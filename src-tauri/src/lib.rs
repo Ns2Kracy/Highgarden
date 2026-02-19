@@ -92,6 +92,13 @@ pub fn run() {
             get_gacha_stats,
             export_gacha_records,
             select_gacha_export_path,
+            // Hypergryph auth
+            get_hypergryph_session,
+            hypergryph_login_password,
+            hypergryph_send_sms,
+            hypergryph_login_by_code,
+            hypergryph_logout,
+            fetch_gacha_with_login,
         ])
         .run(tauri::generate_context!())
         .expect("error while running highgarden");
