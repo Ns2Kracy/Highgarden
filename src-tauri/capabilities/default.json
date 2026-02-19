@@ -5,6 +5,17 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "opener:default"
+    "opener:default",
+    "fs:default",
+    "fs:allow-appdata-read-recursive",
+    "fs:allow-appdata-write-recursive",
+    "fs:allow-download-read-recursive",
+    "fs:allow-download-write-recursive",
+    "dialog:default",
+    "shell:default",
+    "shell:allow-open",
+    "process:default",
+    "process:allow-exit",
+    "process:allow-restart"
   ]
 }

@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:deepwiki.com)",
+      "Bash(gh api:*)",
+      "Bash(powershell -Command \"$input | ForEach-Object { [System.Text.Encoding]::UTF8.GetString\\([System.Convert]::FromBase64String\\($_\\) }\")",
+      "Bash(gh.exe api:*)",
+      "Bash(where:*)",
+      "Bash(powershell.exe -Command \"Get-Command gh -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source\")",
+      "WebFetch(domain:dwd.moe)",
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "WebFetch(domain:blog.csdn.net)",
+      "Bash(python:*)",
+      "Bash(findstr:*)",
+      "Bash(printf:*)",
+      "WebFetch(domain:arkgacha.kwer.top)",
+      "WebFetch(domain:endfieldrecords.com)",
+      "Bash(# Fetch an actual archived API response to see real data curl -s \"\"https://raw.githubusercontent.com/daydreamer-json/ak-endfield-api-archive/main/output/akEndfield/launcher/game/6/latest.json\"\")",
+      "WebFetch(domain:endfieldtools.dev)",
+      "Bash(# Fetch the patch list to see actual patch URL format curl -s \"\"https://raw.githubusercontent.com/daydreamer-json/ak-endfield-api-archive/main/output/akEndfield/launcher/game/6/all_patch.json\"\")",
+      "Bash(# Get patch list for Global Windows Official to see a real patch example curl -s \"\"https://raw.githubusercontent.com/daydreamer-json/ak-endfield-api-archive/main/output/akEndfield/launcher/game/6/list_patch.md\"\")",
+      "WebFetch(domain:greasyfork.org)",
+      "Bash(bun add:*)",
+      "Bash(cargo check:*)",
+      "Bash(bun run:*)",
+      "Bash(find:*)",
+      "Bash(done)",
+      "Bash(du:*)",
+      "Bash(ls:*)",
+      "WebFetch(domain:launcher.hypergryph.com)",
+      "WebFetch(domain:ak.hycdn.cn)",
+      "WebFetch(domain:ak-conf.hypergryph.com)",
+      "Bash(bun install)"
+    ]
+  }
+}

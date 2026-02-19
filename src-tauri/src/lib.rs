@@ -1,14 +1,73 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
+mod commands;
+mod config;
+mod download;
+mod game;
+
+use commands::{AppState, *};
+use download::DownloadManager;
+use std::sync::Arc;
+use tauri::Manager;
+use tokio::sync::RwLock;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_process::init())
+        .setup(|app| {
+            // Load persisted config (blocking is fine at startup)
+            let cfg =
+                tauri::async_runtime::block_on(config::load_config(app.handle()))
+                    .unwrap_or_default();
+            let config_state: Arc<RwLock<config::AppConfig>> =
+                Arc::new(RwLock::new(cfg));
+            app.manage(config_state);
+
+            let download_manager = DownloadManager::new(8, None)
+                .expect("Failed to create download manager");
+
+            let http_client = reqwest::Client::builder()
+                .user_agent("Mozilla/5.0 Highgarden/0.1.0")
+                .build()
+                .expect("Failed to create HTTP client");
+
+            let state = Arc::new(RwLock::new(AppState {
+                download_manager: Arc::new(download_manager),
+                http_client,
+                running_games: std::collections::HashMap::new(),
+            }));
+
+            app.manage(state);
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            // Window
+            window_minimize,
+            window_toggle_maximize,
+            window_close,
+            // Config
+            get_app_config,
+            set_settings,
+            set_game_path,
+            // Game
+            launch_game,
+            stop_game,
+            validate_game_path,
+            fetch_game_version,
+            select_game_path,
+            select_download_path,
+            // Game download
+            fetch_game_manifest,
+            start_game_install,
+            // Download tasks
+            get_download_tasks,
+            start_download_task,
+            pause_download_task,
+            cancel_download_task,
+        ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .expect("error while running highgarden");
 }
