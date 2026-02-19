@@ -91,8 +91,6 @@ export interface GachaStats {
 export interface AppSettings {
   theme: 'dark' | 'light';
   language: 'zh-CN' | 'en-US';
-  downloadConcurrency: number;
-  downloadThreads: number;
   downloadPath: string;
   proxyUrl: string | null;
 }

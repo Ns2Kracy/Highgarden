@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
@@ -26,8 +27,18 @@ pub fn run() {
                 Arc::new(RwLock::new(cfg));
             app.manage(config_state);
 
-            let download_manager = DownloadManager::new(8, None)
-                .expect("Failed to create download manager");
+            let download_manager = {
+                let persist_path = app
+                    .path()
+                    .app_data_dir()
+                    .map(|d| d.join("downloads.json"))
+                    .ok();
+                let dm = DownloadManager::new(3, None, persist_path)
+                    .expect("Failed to create download manager");
+                tauri::async_runtime::block_on(dm.load_persisted())
+                    .unwrap_or_else(|e| log::error!("Failed to load persisted downloads: {e}"));
+                dm
+            };
 
             let http_client = reqwest::Client::builder()
                 .user_agent("Mozilla/5.0 Highgarden/0.1.0")
@@ -54,7 +65,6 @@ pub fn run() {
             set_game_path,
             // Game
             launch_game,
-            stop_game,
             validate_game_path,
             fetch_game_version,
             select_game_path,
@@ -67,6 +77,8 @@ pub fn run() {
             start_download_task,
             pause_download_task,
             cancel_download_task,
+            // Cache
+            clear_game_cache,
         ])
         .run(tauri::generate_context!())
         .expect("error while running highgarden");

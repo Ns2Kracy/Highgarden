@@ -34,7 +34,8 @@
       "WebFetch(domain:launcher.hypergryph.com)",
       "WebFetch(domain:ak.hycdn.cn)",
       "WebFetch(domain:ak-conf.hypergryph.com)",
-      "Bash(bun install)"
+      "Bash(bun install)",
+      "Bash(cargo build:*)"
     ]
   }
 }

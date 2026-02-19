@@ -6,14 +6,13 @@
   import { onMount, onDestroy } from 'svelte';
   import {
     Play, Download, RefreshCw, FolderOpen,
-    AlertCircle, X, Pause, Loader, CheckCircle2, Square, Cpu, MemoryStick
+    AlertCircle, X, Pause, Loader, CheckCircle2,
+    MoreHorizontal, Wrench, Trash2
   } from 'lucide-svelte';
   import type { GameId, GameManifest, DownloadProgress, DownloadStatus } from '$lib/types';
 
   // ─── Per-game download state ───────────────────────────────────────────────
   type DownloadPhase = 'idle' | 'fetching' | 'confirm' | 'downloading' | 'done' | 'launching' | 'playing';
-
-  interface GameMetrics { cpu: number; memory: number; gpu: number | null; }
 
   let phases = $state<Record<GameId, DownloadPhase>>({
     arknights: 'idle',
@@ -27,19 +26,22 @@
     arknights: [],
     endfield: [],
   });
-  let gameMetrics = $state<Record<GameId, GameMetrics | null>>({
-    arknights: null,
-    endfield: null,
-  });
 
-  // ─── Error toast ───────────────────────────────────────────────────────────
-  let errorMsg = $state('');
-  let errorTimer: ReturnType<typeof setTimeout> | null = null;
-  function showError(msg: string) {
-    errorMsg = msg;
-    if (errorTimer) clearTimeout(errorTimer);
-    errorTimer = setTimeout(() => { errorMsg = ''; }, 6000);
+  // ─── Toast (error & info) ──────────────────────────────────────────────────
+  type ToastKind = 'error' | 'info';
+  let toastMsg = $state('');
+  let toastKind = $state<ToastKind>('error');
+  let toastTimer: ReturnType<typeof setTimeout> | null = null;
+  function showError(msg: string) { showToast(msg, 'error'); }
+  function showInfo(msg: string)  { showToast(msg, 'info'); }
+  function showToast(msg: string, kind: ToastKind) {
+    toastMsg = msg; toastKind = kind;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toastMsg = ''; }, 6000);
   }
+
+  // ─── Dropdown menu ─────────────────────────────────────────────────────────
+  let menuOpenId = $state<GameId | null>(null);
 
   // ─── Event listener ────────────────────────────────────────────────────────
   let unlisten: (() => void) | null = null;
@@ -63,19 +65,11 @@
       }
     });
 
-    unlistenStatus = await listen<{
-      gameId: GameId; running: boolean; cpuPercent: number; memoryBytes: number; gpuPercent: number | null;
-    }>('game:status', ({ payload }) => {
+    unlistenStatus = await listen<{ gameId: GameId; running: boolean }>('game:status', ({ payload }) => {
       if (payload.running) {
         phases[payload.gameId] = 'playing';
-        gameMetrics[payload.gameId] = {
-          cpu: payload.cpuPercent,
-          memory: payload.memoryBytes,
-          gpu: payload.gpuPercent,
-        };
       } else if (phases[payload.gameId] === 'launching' || phases[payload.gameId] === 'playing') {
         phases[payload.gameId] = 'idle';
-        gameMetrics[payload.gameId] = null;
       }
     });
   });
@@ -100,7 +94,7 @@
     const total = m ? m.packs.reduce((s, p) => s + p.size, 0) : 0;
     const progress = total > 0 ? Math.min((downloaded / total) * 100, 100) : 0;
     const hasError = tasks.some(t => t.status === 'error');
-    return { downloaded, speed, progress, hasError };
+    return { downloaded, speed, progress, hasError, total };
   }
 
   // ─── Actions ───────────────────────────────────────────────────────────────
@@ -121,14 +115,6 @@
     } catch (e) {
       phases[gameId] = 'idle';
       showError(`启动失败：${e}`);
-    }
-  }
-
-  async function stopGame(gameId: GameId) {
-    try {
-      await invoke('stop_game', { gameId });
-    } catch (e) {
-      showError(`停止失败：${e}`);
     }
   }
 
@@ -194,6 +180,36 @@
     phases[gameId] = 'idle';
   }
 
+  async function checkUpdate(gameId: GameId) {
+    menuOpenId = null;
+    try {
+      const version = await invoke<string | null>('fetch_game_version', { gameId });
+      if (version) {
+        showInfo(`当前最新版本：${version}`);
+      } else {
+        showInfo('暂时无法获取版本信息');
+      }
+    } catch (e) {
+      showError(`检查更新失败：${e}`);
+    }
+  }
+
+  async function clearCache(gameId: GameId, installPath: string | null) {
+    menuOpenId = null;
+    if (!installPath) { showError('请先设置游戏安装路径'); return; }
+    try {
+      await invoke('clear_game_cache', { gameId, installPath });
+      showInfo('缓存已清除');
+    } catch (e) {
+      showError(`清除缓存失败：${e}`);
+    }
+  }
+
+  function repairGame(gameId: GameId) {
+    menuOpenId = null;
+    showInfo('游戏修复功能暂未开放');
+  }
+
   // ─── UI data ───────────────────────────────────────────────────────────────
   const gameColors: Record<GameId, string> = {
     arknights: 'var(--color-ak-blue)',
@@ -234,11 +250,11 @@
     {/each}
   </div>
 
-  {#if errorMsg}
-    <div class="error-toast">
-      <AlertCircle size={14} />
-      <span>{errorMsg}</span>
-      <button class="toast-close" onclick={() => { errorMsg = ''; }}><X size={12} /></button>
+  {#if toastMsg}
+    <div class="toast" class:toast-info={toastKind === 'info'} class:toast-error={toastKind === 'error'}>
+      {#if toastKind === 'error'}<AlertCircle size={14} />{:else}<CheckCircle2 size={14} />{/if}
+      <span>{toastMsg}</span>
+      <button class="toast-close" onclick={() => { toastMsg = ''; }}><X size={12} /></button>
     </div>
   {/if}
 
@@ -305,46 +321,61 @@
                   <span>开始游戏</span>
                 </button>
               {/if}
-              <button class="btn btn-secondary" onclick={() => selectInstallPath(game.id)}>
-                <FolderOpen size={16} />
-                <span>更改路径</span>
-              </button>
+
+              <!-- More-actions dropdown trigger -->
+              <div class="more-menu">
+                <button
+                  class="btn-icon"
+                  title="更多操作"
+                  onclick={() => { menuOpenId = menuOpenId === game.id ? null : game.id; }}
+                >
+                  <MoreHorizontal size={18} />
+                </button>
+
+                {#if menuOpenId === game.id}
+                  <div class="dropdown">
+                    <button class="dd-item" onclick={() => selectInstallPath(game.id)}>
+                      <FolderOpen size={14} />
+                      <span>更改路径</span>
+                    </button>
+                    <button class="dd-item" onclick={() => checkUpdate(game.id)}>
+                      <RefreshCw size={14} />
+                      <span>检查更新</span>
+                    </button>
+                    <button class="dd-item" onclick={() => repairGame(game.id)}>
+                      <Wrench size={14} />
+                      <span>游戏修复</span>
+                    </button>
+                    <div class="dd-divider"></div>
+                    <button class="dd-item dd-danger" onclick={() => clearCache(game.id, game.installPath)}>
+                      <Trash2 size={14} />
+                      <span>清除缓存</span>
+                    </button>
+                  </div>
+                {/if}
+              </div>
             </div>
+
+            <!-- Backdrop to close dropdown on outside click -->
+            {#if menuOpenId === game.id}
+              <div class="menu-backdrop" onclick={() => { menuOpenId = null; }}></div>
+            {/if}
 
           <!-- LAUNCHING -->
           {:else if phase === 'launching'}
-            <div class="status-row">
-              <Loader size={16} class="spin" />
-              <span>正在启动游戏…</span>
+            <div class="action-row">
+              <button class="btn btn-primary" disabled>
+                <Loader size={16} class="spin" />
+                <span>启动中…</span>
+              </button>
             </div>
 
           <!-- PLAYING -->
           {:else if phase === 'playing'}
-            {@const metrics = gameMetrics[game.id]}
-            <div class="playing-panel">
-              <div class="metrics-row">
-                <div class="metric">
-                  <Cpu size={13} />
-                  <span class="metric-label">CPU</span>
-                  <span class="metric-val">{(metrics?.cpu ?? 0).toFixed(1)}%</span>
-                </div>
-                <div class="metric-sep"></div>
-                {#if metrics?.gpu !== null && metrics?.gpu !== undefined}
-                  <div class="metric">
-                    <span class="metric-icon">GPU</span>
-                    <span class="metric-val">{(metrics.gpu).toFixed(1)}%</span>
-                  </div>
-                  <div class="metric-sep"></div>
-                {/if}
-                <div class="metric">
-                  <MemoryStick size={13} />
-                  <span class="metric-label">内存</span>
-                  <span class="metric-val">{formatSize(metrics?.memory ?? 0)}</span>
-                </div>
-              </div>
-              <button class="btn btn-danger" onclick={() => stopGame(game.id)}>
-                <Square size={14} />
-                <span>停止游戏</span>
+            <div class="action-row">
+              <button class="btn btn-playing" disabled>
+                <span class="playing-dot"></span>
+                <span>正在游戏</span>
               </button>
             </div>
 
@@ -404,7 +435,7 @@
               <div class="dl-header">
                 <span class="dl-version">v{manifest?.version}</span>
                 <span class="dl-meta">
-                  {formatSize(stats.downloaded)} / {formatSize(manifest?.totalSize ?? 0)}
+                  {formatSize(stats.downloaded)} / {formatSize(stats.total)}
                   {#if stats.speed > 0}
                     <span class="speed-chip">{formatSpeed(stats.speed)}</span>
                   {/if}
@@ -500,16 +531,23 @@
   .tab-badge.playing { background: rgba(34,197,94,0.2); color: #22c55e; }
 
   /* Error toast */
-  .error-toast {
+  .toast {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 10px 16px;
+    font-size: 13px;
+    flex-shrink: 0;
+  }
+  .toast-error {
     background: rgba(248,113,113,0.1);
     border-bottom: 1px solid rgba(248,113,113,0.25);
     color: var(--color-error);
-    font-size: 13px;
-    flex-shrink: 0;
+  }
+  .toast-info {
+    background: rgba(59,130,246,0.1);
+    border-bottom: 1px solid rgba(59,130,246,0.25);
+    color: var(--color-ak-blue);
   }
   .toast-close {
     margin-left: auto;
@@ -743,79 +781,104 @@
   }
   .btn-secondary:hover { border-color: var(--color-border-hover); color: var(--color-text-primary); }
 
-  /* Playing panel */
-  .playing-panel {
+  .btn-playing {
+    background: rgba(34, 197, 94, 0.12);
+    color: #22c55e;
+    border: 1px solid rgba(34, 197, 94, 0.3);
     display: flex;
     align-items: center;
-    gap: 16px;
-    background: rgba(10,12,18,0.7);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg);
-    padding: 12px 16px;
-    backdrop-filter: blur(8px);
-    width: fit-content;
-  }
-
-  .metrics-row {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .metric {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--color-text-secondary);
-    font-size: 13px;
-  }
-
-  .metric-icon {
-    font-size: 10px;
-    font-weight: 700;
-    color: var(--color-text-muted);
-    letter-spacing: 0.05em;
-  }
-
-  .metric-label {
-    color: var(--color-text-muted);
-    font-size: 11px;
-  }
-
-  .metric-val {
-    color: var(--color-accent);
-    font-family: var(--font-mono);
-    font-weight: 600;
-    min-width: 52px;
-  }
-
-  .metric-sep {
-    width: 1px;
-    height: 20px;
-    background: var(--color-border);
-  }
-
-  .btn-danger {
-    background: rgba(248,113,113,0.12);
-    color: var(--color-error);
-    border: 1px solid rgba(248,113,113,0.3);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 7px 14px;
+    gap: 8px;
+    padding: 10px 24px;
     border-radius: var(--radius-md);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: default;
     font-family: var(--font-ui);
-    transition: all 0.15s;
-    white-space: nowrap;
+    min-width: 140px;
+    justify-content: center;
   }
-  .btn-danger:hover {
-    background: rgba(248,113,113,0.2);
-    border-color: var(--color-error);
+
+  .playing-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #22c55e;
+    flex-shrink: 0;
+    animation: pulse 2s ease-in-out infinite;
   }
 
   :global(.spin) { animation: spin 1s linear infinite; }
   @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  /* More-actions icon button */
+  .btn-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-elevated);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+  }
+  .btn-icon:hover { border-color: var(--color-border-hover); color: var(--color-text-primary); }
+
+  /* Dropdown container */
+  .more-menu {
+    position: relative;
+  }
+
+  .dropdown {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    min-width: 160px;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: 4px;
+    z-index: 100;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .dd-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    font-size: 13px;
+    font-family: var(--font-ui);
+    border-radius: var(--radius-sm);
+    text-align: left;
+    transition: background 0.1s ease, color 0.1s ease;
+    white-space: nowrap;
+  }
+  .dd-item:hover { background: var(--color-bg-secondary); color: var(--color-text-primary); }
+  .dd-item.dd-danger { color: var(--color-error); }
+  .dd-item.dd-danger:hover { background: rgba(248,113,113,0.1); color: var(--color-error); }
+
+  .dd-divider {
+    height: 1px;
+    background: var(--color-border);
+    margin: 4px 0;
+  }
+
+  /* Backdrop for closing dropdown */
+  .menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 99;
+  }
 </style>

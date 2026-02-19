@@ -32,7 +32,8 @@
       ? Math.min((totalDownloaded / manifest.totalSize) * 100, 100)
       : 0
   );
-  let activeTasks = $derived($downloadTasks.filter(t => taskIds.includes(t.id)));
+  // All tasks in the store (including ones loaded from previous sessions)
+  let activeTasks = $derived($downloadTasks);
 
   let unlisten: (() => void) | null = null;
 
@@ -131,12 +132,14 @@
   async function pauseTask(taskId: string) {
     try {
       await invoke('pause_download_task', { taskId });
+      updateTask(taskId, { status: 'paused', speed: 0 });
     } catch (e) { showError(`${e}`); }
   }
 
   async function resumeTask(taskId: string) {
     try {
       await invoke('start_download_task', { taskId });
+      updateTask(taskId, { status: 'downloading' });
     } catch (e) { showError(`${e}`); }
   }
 
@@ -282,7 +285,7 @@
       <!-- Pack list -->
       <div class="pack-list">
         {#each activeTasks as task (task.id)}
-          <div class="task-card">
+          <div class="task-card" class:paused={task.status === 'paused'}>
             <div class="task-header">
               <span class="task-name">{task.name}</span>
               <div class="task-right">
@@ -295,7 +298,7 @@
                       <Pause size={12} />
                     </button>
                   {:else if task.status === 'paused'}
-                    <button class="ctrl-btn" title="继续" onclick={() => resumeTask(task.id)}>
+                    <button class="ctrl-btn resume" title="继续" onclick={() => resumeTask(task.id)}>
                       <Play size={12} />
                     </button>
                   {/if}
@@ -311,6 +314,7 @@
             <div class="progress-bar">
               <div
                 class="progress-fill"
+                class:paused={task.status === 'paused'}
                 class:verifying={task.status === 'verifying'}
                 style="width: {task.progress}%"
               ></div>
@@ -321,6 +325,9 @@
               {#if task.status === 'downloading' && task.speed > 0}
                 <span class="speed">{formatSpeed(task.speed)}</span>
               {/if}
+              {#if task.status === 'paused'}
+                <span class="paused-label">已暂停</span>
+              {/if}
               {#if task.error}
                 <span class="err">{task.error}</span>
               {/if}
@@ -329,7 +336,7 @@
         {/each}
       </div>
     </div>
-  {:else if phase === 'idle'}
+  {:else if phase === 'idle' && activeTasks.length === 0}
     <div class="empty-state">
       <Download size={40} strokeWidth={1} />
       <p>暂无下载任务</p>
@@ -554,6 +561,10 @@
     border-radius: 2px;
     transition: width 0.3s ease;
   }
+  .progress-fill.paused {
+    background: var(--color-warning, #eab308);
+    animation: none;
+  }
   .progress-fill.verifying {
     background: var(--color-endfield-cyan);
     animation: pulse 1s ease-in-out infinite;
@@ -577,9 +588,10 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    transition: border-color 0.1s;
+    transition: border-color 0.15s, opacity 0.15s;
   }
   .task-card:hover { border-color: var(--color-border-hover); }
+  .task-card.paused { opacity: 0.7; border-color: rgba(234,179,8,0.25); }
 
   .task-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
   .task-name { font-size: 12px; color: var(--color-text-secondary); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
@@ -598,6 +610,8 @@
     transition: all 0.1s;
   }
   .ctrl-btn:hover { border-color: var(--color-border-hover); color: var(--color-text-primary); }
+  .ctrl-btn.resume { border-color: rgba(234,179,8,0.4); color: var(--color-warning, #eab308); }
+  .ctrl-btn.resume:hover { border-color: var(--color-warning, #eab308); background: rgba(234,179,8,0.1); }
   .ctrl-btn.danger:hover { border-color: var(--color-error); color: var(--color-error); }
 
   .task-meta {
@@ -608,6 +622,7 @@
     font-family: var(--font-mono);
   }
   .speed { color: var(--color-ak-blue); margin-left: auto; }
+  .paused-label { color: var(--color-warning, #eab308); margin-left: auto; font-style: italic; }
   .err { color: var(--color-error); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Empty state */

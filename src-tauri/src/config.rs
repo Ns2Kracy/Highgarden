@@ -13,8 +13,6 @@ pub struct AppSettings {
     pub theme: String,
     pub language: String,
     pub download_path: String,
-    pub download_concurrency: usize,
-    pub download_threads: usize,
     pub proxy_url: Option<String>,
 }
 
@@ -24,8 +22,6 @@ impl Default for AppSettings {
             theme: "dark".to_string(),
             language: "zh-CN".to_string(),
             download_path: String::new(),
-            download_concurrency: 8,
-            download_threads: 3,
             proxy_url: None,
         }
     }

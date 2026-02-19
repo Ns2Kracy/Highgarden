@@ -5,6 +5,7 @@
   import { onMount } from 'svelte';
   import { settings, defaults, markInitialized } from '$lib/stores/settings';
   import { games } from '$lib/stores/games';
+  import { get } from 'svelte/store';
   import { invoke } from '@tauri-apps/api/core';
   import type { AppSettings } from '$lib/types';
 
@@ -20,13 +21,18 @@
       settings.set({ ...defaults, ...config.settings });
 
       if (config.gamePaths && Object.keys(config.gamePaths).length > 0) {
-        games.update((gs) =>
-          gs.map((g) => {
+        const updatedGames = await Promise.all(
+          get(games).map(async (g) => {
             const path = config.gamePaths[g.id];
-            if (path) return { ...g, installPath: path, installed: true };
-            return g;
+            if (!path) return g;
+            const installed = await invoke<boolean>('validate_game_path', {
+              gameId: g.id,
+              path
+            }).catch(() => false);
+            return { ...g, installPath: path, installed };
           })
         );
+        games.set(updatedGames);
       }
     } catch (e) {
       console.warn('Failed to load config:', e);

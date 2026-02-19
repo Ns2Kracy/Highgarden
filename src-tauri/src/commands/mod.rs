@@ -21,58 +21,6 @@ pub struct AppState {
 pub struct GameStatus {
     pub game_id: String,
     pub running: bool,
-    pub cpu_percent: f32,
-    pub memory_bytes: u64,
-    pub gpu_percent: Option<f32>,
-}
-
-fn cpu_core_count() -> f32 {
-    std::thread::available_parallelism()
-        .map(|n| n.get() as f32)
-        .unwrap_or(1.0)
-}
-
-/// GPU utilization percentage for a specific process (via WMI, Windows only).
-/// Returns None if WMI / GPU performance counters are unavailable.
-async fn query_gpu_percent(pid: u32) -> Option<f32> {
-    tokio::task::spawn_blocking(move || {
-        use wmi::{COMLibrary, Variant, WMIConnection};
-
-        let com = COMLibrary::without_security().ok()?;
-        let wmi_con = WMIConnection::new(com.into()).ok()?;
-
-        // Name field format: "pid_1234_luid_..._engtype_3D"
-        let pid_prefix = format!("pid_{}_", pid);
-
-        let rows: Vec<HashMap<String, Variant>> = wmi_con
-            .raw_query(
-                "SELECT Name, UtilizationPercentage \
-                 FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine",
-            )
-            .ok()?;
-
-        let total: f32 = rows
-            .iter()
-            .filter(|r| {
-                if let Some(Variant::String(name)) = r.get("Name") {
-                    name.contains(&pid_prefix) && name.contains("engtype_3D")
-                } else {
-                    false
-                }
-            })
-            .filter_map(|r| match r.get("UtilizationPercentage")? {
-                Variant::UI4(v) => Some(*v as f32),
-                Variant::UI8(v) => Some(*v as f32),
-                Variant::I4(v) => Some(*v as f32),
-                _ => None,
-            })
-            .sum();
-
-        Some(total.min(100.0))
-    })
-    .await
-    .ok()
-    .flatten()
 }
 
 // ─── Config / Settings ───────────────────────────────────────────────────────
@@ -190,46 +138,7 @@ pub async fn launch_game(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn stop_game(
-    game_id: String,
-    state: State<'_, Arc<RwLock<AppState>>>,
-) -> Result<(), String> {
-    let pid = state.read().await.running_games.get(&game_id).copied();
-    let mut sys = SysInfo::new();
-
-    if let Some(pid) = pid {
-        // Fast path: known PID
-        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]));
-        if let Some(proc) = sys.process(pid) {
-            proc.kill();
-        }
-        state.write().await.running_games.remove(&game_id);
-        return Ok(());
-    }
-
-    // Fallback: monitor_game may not have found the process yet —
-    // scan all processes and kill by known exe name.
-    let exe_names: &[&str] = match game_id.as_str() {
-        "arknights" => &["arknights.exe", "明日方舟.exe"],
-        "endfield"  => &["arknightsendfield.exe", "endfield.exe"],
-        _ => &[],
-    };
-
-    sys.refresh_processes(ProcessesToUpdate::All);
-    let mut killed = false;
-    for proc in sys.processes().values() {
-        let name = proc.name().to_string_lossy().to_lowercase();
-        if exe_names.iter().any(|e| name == *e || name.trim_end_matches(".exe") == e.trim_end_matches(".exe")) {
-            proc.kill();
-            killed = true;
-        }
-    }
-
-    if killed { Ok(()) } else { Err(format!("游戏 {} 未在运行", game_id)) }
-}
-
-/// Background task: find the game process after launch, then monitor it.
+/// Background task: find the game process after launch, then watch for it to exit.
 async fn monitor_game(
     app: AppHandle,
     state: Arc<RwLock<AppState>>,
@@ -237,7 +146,6 @@ async fn monitor_game(
     exe_name: String,
 ) {
     let mut sys = SysInfo::new();
-    let num_cpus = cpu_core_count();
 
     // Retry finding the process for up to 10 seconds
     let mut game_pid: Option<SysPid> = None;
@@ -246,7 +154,6 @@ async fn monitor_game(
         sys.refresh_processes(ProcessesToUpdate::All);
         for (pid, proc) in sys.processes() {
             let name = proc.name().to_string_lossy().to_lowercase();
-            // Match with or without .exe extension
             if name == exe_name || name.trim_end_matches(".exe") == exe_name.trim_end_matches(".exe") {
                 game_pid = Some(*pid);
                 break;
@@ -258,57 +165,32 @@ async fn monitor_game(
     }
 
     let Some(pid) = game_pid else {
-        let _ = app.emit(
-            "game:status",
-            GameStatus { game_id, running: false, cpu_percent: 0.0, memory_bytes: 0, gpu_percent: None },
-        );
+        let _ = app.emit("game:status", GameStatus { game_id, running: false });
         return;
     };
 
-    // Convert SysPid to u32 for WMI query
-    let pid_u32: u32 = pid.to_string().parse().unwrap_or(0);
-
     state.write().await.running_games.insert(game_id.clone(), pid);
-    let _ = app.emit(
-        "game:status",
-        GameStatus { game_id: game_id.clone(), running: true, cpu_percent: 0.0, memory_bytes: 0, gpu_percent: None },
-    );
+    let _ = app.emit("game:status", GameStatus { game_id: game_id.clone(), running: true });
 
-    // Monitor loop — refresh only the game process every 2 seconds
+    // Poll every 2 seconds until the process exits.
+    // Use ProcessesToUpdate::All so the full PID list is re-enumerated;
+    // anti-cheat can block per-PID inspection but cannot hide a missing PID
+    // from a full process snapshot.
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]));
-
-        if let Some(proc) = sys.process(pid) {
-            let cpu = proc.cpu_usage() / num_cpus;
-            let memory_bytes = proc.memory();
-            let gpu_percent = query_gpu_percent(pid_u32).await;
-
-            let _ = app.emit(
-                "game:status",
-                GameStatus {
-                    game_id: game_id.clone(),
-                    running: true,
-                    cpu_percent: cpu,
-                    memory_bytes,
-                    gpu_percent,
-                },
-            );
-        } else {
+        sys.refresh_processes(ProcessesToUpdate::All);
+        if sys.process(pid).is_none() {
             break;
         }
     }
 
-    let _ = app.emit(
-        "game:status",
-        GameStatus { game_id: game_id.clone(), running: false, cpu_percent: 0.0, memory_bytes: 0, gpu_percent: None },
-    );
+    let _ = app.emit("game:status", GameStatus { game_id: game_id.clone(), running: false });
     state.write().await.running_games.remove(&game_id);
 }
 
 #[tauri::command]
 pub async fn validate_game_path(game_id: String, path: String) -> bool {
-    game::validate_install_path(&game_id, &path)
+    game::check_game_installed(&game_id, &path)
 }
 
 #[tauri::command]
@@ -397,8 +279,14 @@ pub async fn start_game_install(
 
     let mut task_ids = Vec::with_capacity(manifest.packs.len());
 
+    log::info!(
+        "[install] game={} packs={} dest={}",
+        game_id, manifest.packs.len(), dest_dir
+    );
+
     for pack in &manifest.packs {
         let dest_path = format!("{}/{}", dest_dir.trim_end_matches('/'), pack.filename);
+        log::info!("[install] pack={} size={} dest={}", pack.filename, pack.size, dest_path);
         let task_id = {
             let s = state.read().await;
             s.download_manager
@@ -407,6 +295,7 @@ pub async fn start_game_install(
                     pack.filename.clone(),
                     pack.url.clone(),
                     dest_path,
+                    Some(pack.size),       // known from manifest — skips HEAD
                     None,
                     Some(pack.md5.clone()),
                 )
@@ -480,4 +369,30 @@ pub async fn cancel_download_task(
         .cancel_task(&task_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+// ─── Cache management ─────────────────────────────────────────────────────────
+
+/// Delete the hot-update cache directory for a game.
+/// Arknights / Endfield both store cached assets in `HotUpdate/`.
+#[tauri::command]
+pub async fn clear_game_cache(
+    game_id: String,
+    install_path: String,
+) -> Result<(), String> {
+    let cache_dirs: &[&str] = match game_id.as_str() {
+        "arknights" | "endfield" => &["HotUpdate"],
+        _ => return Err(format!("未知游戏：{}", game_id)),
+    };
+
+    let base = std::path::Path::new(&install_path);
+    for dir_name in cache_dirs {
+        let path = base.join(dir_name);
+        if path.is_dir() {
+            tokio::fs::remove_dir_all(&path)
+                .await
+                .map_err(|e| format!("清除 {} 失败：{}", dir_name, e))?;
+        }
+    }
+    Ok(())
 }

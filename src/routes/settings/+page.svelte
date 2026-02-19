@@ -41,38 +41,6 @@
 
       <div class="setting-row">
         <div class="setting-label">
-          <span>并发下载块数</span>
-          <p>单个任务同时下载的分片数量</p>
-        </div>
-        <div class="setting-control">
-          <input
-            type="number"
-            class="num-input"
-            min="1"
-            max="32"
-            bind:value={$settings.downloadConcurrency}
-          />
-        </div>
-      </div>
-
-      <div class="setting-row">
-        <div class="setting-label">
-          <span>同时下载任务数</span>
-          <p>并行执行的下载任务数量</p>
-        </div>
-        <div class="setting-control">
-          <input
-            type="number"
-            class="num-input"
-            min="1"
-            max="8"
-            bind:value={$settings.downloadThreads}
-          />
-        </div>
-      </div>
-
-      <div class="setting-row">
-        <div class="setting-label">
           <span>代理地址</span>
           <p>HTTP/HTTPS 代理服务器 (可选)</p>
         </div>
@@ -215,7 +183,7 @@
     color: var(--color-text-primary);
   }
 
-  .num-input, .text-input {
+  .text-input {
     background: var(--color-bg-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
@@ -225,18 +193,10 @@
     padding: 6px 10px;
     outline: none;
     transition: border-color 0.1s;
-  }
-
-  .num-input {
-    width: 80px;
-    text-align: center;
-  }
-
-  .text-input {
     width: 240px;
   }
 
-  .num-input:focus, .text-input:focus {
+  .text-input:focus {
     border-color: var(--color-accent-dim);
   }
 
