@@ -9,7 +9,7 @@
     AlertCircle, X, Pause, Loader, CheckCircle2,
     MoreHorizontal, Wrench, Trash2
   } from 'lucide-svelte';
-  import type { GameId, GameManifest, DownloadProgress, DownloadStatus } from '$lib/types';
+  import type { GameId, DownloadTask, GameManifest, DownloadProgress, DownloadStatus } from '$lib/types';
 
   // ─── Per-game download state ───────────────────────────────────────────────
   type DownloadPhase = 'idle' | 'fetching' | 'confirm' | 'downloading' | 'done' | 'launching' | 'playing';
@@ -47,6 +47,24 @@
   let unlisten: (() => void) | null = null;
   let unlistenStatus: (() => void) | null = null;
   onMount(async () => {
+    // Restore persisted download state so the UI shows progress on restart.
+    try {
+      const saved = await invoke<DownloadTask[]>('get_download_tasks');
+      saved.forEach((t) => addTask(t));
+
+      for (const gameId of ['arknights', 'endfield'] as GameId[]) {
+        const pending = saved.filter(
+          (t) => t.gameId === gameId && t.status !== 'completed' && t.status !== 'error'
+        );
+        if (pending.length > 0) {
+          gameTaskIds[gameId] = pending.map((t) => t.id);
+          phases[gameId] = 'downloading';
+          // Select the game that has a pending download so the user sees it.
+          selectedGameId.set(gameId);
+        }
+      }
+    } catch {}
+
     unlisten = await listen<DownloadProgress>('download:progress', ({ payload }) => {
       updateTask(payload.taskId, {
         downloadedSize: payload.downloadedSize,
@@ -91,10 +109,14 @@
     const downloaded = tasks.reduce((s, t) => s + t.downloadedSize, 0);
     const speed = tasks.filter(t => t.status === 'downloading').reduce((s, t) => s + t.speed, 0);
     const m = manifests[gameId];
-    const total = m ? m.packs.reduce((s, p) => s + p.size, 0) : 0;
+    // Use manifest total when available; fall back to summing task totalSizes (on restart without manifest).
+    const total = m
+      ? m.packs.reduce((s, p) => s + p.size, 0)
+      : tasks.reduce((s, t) => s + t.totalSize, 0);
     const progress = total > 0 ? Math.min((downloaded / total) * 100, 100) : 0;
+    const allPaused = tasks.length > 0 && tasks.every(t => t.status === 'paused' || t.status === 'completed');
     const hasError = tasks.some(t => t.status === 'error');
-    return { downloaded, speed, progress, hasError, total };
+    return { downloaded, speed, progress, hasError, total, allPaused };
   }
 
   // ─── Actions ───────────────────────────────────────────────────────────────
@@ -164,7 +186,19 @@
 
   async function pauseAll(gameId: GameId) {
     for (const id of gameTaskIds[gameId]) {
-      try { await invoke('pause_download_task', { taskId: id }); } catch {}
+      try {
+        await invoke('pause_download_task', { taskId: id });
+        updateTask(id, { status: 'paused', speed: 0 });
+      } catch {}
+    }
+  }
+
+  async function resumeAll(gameId: GameId) {
+    for (const id of gameTaskIds[gameId]) {
+      try {
+        await invoke('start_download_task', { taskId: id });
+        updateTask(id, { status: 'downloading' });
+      } catch {}
     }
   }
 
@@ -429,11 +463,16 @@
               </div>
             </div>
 
-          <!-- DOWNLOADING -->
+          <!-- DOWNLOADING / PAUSED -->
           {:else if phase === 'downloading'}
-            <div class="download-panel">
+            <div class="download-panel" class:is-paused={stats.allPaused}>
               <div class="dl-header">
-                <span class="dl-version">v{manifest?.version}</span>
+                <span class="dl-label">
+                  {#if stats.allPaused}已暂停{:else}下载中{/if}
+                  {#if manifest?.version}
+                    <span class="dl-version">v{manifest.version}</span>
+                  {/if}
+                </span>
                 <span class="dl-meta">
                   {formatSize(stats.downloaded)} / {formatSize(stats.total)}
                   {#if stats.speed > 0}
@@ -442,7 +481,11 @@
                 </span>
               </div>
               <div class="progress-bar">
-                <div class="progress-fill" style="width: {stats.progress}%"></div>
+                <div
+                  class="progress-fill"
+                  class:fill-paused={stats.allPaused}
+                  style="width: {stats.progress}%"
+                ></div>
               </div>
               <div class="dl-footer">
                 <span class="dl-pct">{stats.progress.toFixed(1)}%</span>
@@ -450,9 +493,15 @@
                   <span class="dl-error"><AlertCircle size={12} /> 部分分包出错</span>
                 {/if}
                 <div class="dl-controls">
-                  <button class="ctrl-btn" title="暂停全部" onclick={() => pauseAll(game.id)}>
-                    <Pause size={13} />
-                  </button>
+                  {#if stats.allPaused}
+                    <button class="ctrl-btn resume" title="继续" onclick={() => resumeAll(game.id)}>
+                      <Play size={13} />
+                    </button>
+                  {:else}
+                    <button class="ctrl-btn" title="暂停" onclick={() => pauseAll(game.id)}>
+                      <Pause size={13} />
+                    </button>
+                  {/if}
                   <button class="ctrl-btn danger" title="取消" onclick={() => cancelInstall(game.id)}>
                     <X size={13} />
                   </button>
@@ -693,7 +742,9 @@
     padding: 16px 20px;
     backdrop-filter: blur(8px);
     width: 400px;
+    transition: border-color 0.15s;
   }
+  .download-panel.is-paused { border-color: rgba(234,179,8,0.3); }
 
   .dl-header {
     display: flex;
@@ -701,7 +752,8 @@
     align-items: center;
     font-size: 12px;
   }
-  .dl-version { color: var(--color-text-secondary); font-family: var(--font-mono); }
+  .dl-label { color: var(--color-text-secondary); font-weight: 500; display: flex; align-items: center; gap: 8px; }
+  .dl-version { color: var(--color-text-muted); font-family: var(--font-mono); }
   .dl-meta { display: flex; align-items: center; gap: 8px; color: var(--color-text-muted); font-family: var(--font-mono); }
   .speed-chip {
     background: rgba(59,130,246,0.15);
@@ -723,6 +775,7 @@
     border-radius: 3px;
     transition: width 0.4s ease;
   }
+  .progress-fill.fill-paused { background: var(--color-warning, #eab308); }
 
   .dl-footer {
     display: flex;
@@ -745,6 +798,8 @@
   }
   .ctrl-btn:hover { border-color: var(--color-border-hover); color: var(--color-text-primary); }
   .ctrl-btn.danger:hover { border-color: var(--color-error); color: var(--color-error); }
+  .ctrl-btn.resume { border-color: rgba(234,179,8,0.4); color: var(--color-warning, #eab308); }
+  .ctrl-btn.resume:hover { border-color: var(--color-warning, #eab308); background: rgba(234,179,8,0.1); }
 
   /* Done badge */
   .done-badge {

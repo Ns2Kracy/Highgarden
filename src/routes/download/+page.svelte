@@ -34,6 +34,15 @@
   );
   // All tasks in the store (including ones loaded from previous sessions)
   let activeTasks = $derived($downloadTasks);
+  // Show the setup panel only when there are no incomplete tasks, or when the
+  // user has explicitly started the version-check / confirm flow, or manually toggled.
+  let hasIncomplete = $derived(
+    activeTasks.some((t) => t.status !== 'completed' && t.status !== 'error')
+  );
+  let forceShowSetup = $state(false);
+  let showSetup = $derived(
+    forceShowSetup || !hasIncomplete || phase === 'fetching' || phase === 'confirm'
+  );
 
   let unlisten: (() => void) | null = null;
 
@@ -101,6 +110,7 @@
   async function startInstall() {
     if (!manifest || !destDir) return;
     phase = 'downloading';
+    forceShowSetup = false;
     try {
       const ids = await invoke<string[]>('start_game_install', {
         gameId: selectedGame,
@@ -181,6 +191,12 @@
       <h2 class="page-title">下载管理</h2>
       <p class="page-subtitle">游戏安装与更新</p>
     </div>
+    {#if !showSetup}
+      <button class="btn-new" onclick={() => { forceShowSetup = true; phase = 'idle'; }}>
+        <Download size={13} />
+        <span>新建下载</span>
+      </button>
+    {/if}
   </div>
 
   {#if errorMsg}
@@ -192,7 +208,7 @@
   {/if}
 
   <!-- New download setup panel -->
-  {#if phase === 'idle' || phase === 'fetching' || phase === 'confirm'}
+  {#if showSetup}
     <div class="setup-panel">
       <div class="setup-section">
         <label class="setup-label">游戏</label>
@@ -242,7 +258,7 @@
             <Download size={15} />
             <span>开始下载</span>
           </button>
-          <button class="btn btn-ghost" onclick={() => { phase = 'idle'; manifest = null; }}>取消</button>
+          <button class="btn btn-ghost" onclick={() => { phase = 'idle'; manifest = null; forceShowSetup = false; }}>取消</button>
         </div>
       {:else}
         <div class="setup-actions">
@@ -355,9 +371,27 @@
     overflow-y: auto;
   }
 
-  .page-header { flex-shrink: 0; }
+  .page-header { flex-shrink: 0; display: flex; align-items: flex-end; justify-content: space-between; }
   .page-title { font-size: 22px; font-weight: 700; color: var(--color-text-primary); }
   .page-subtitle { font-size: 13px; color: var(--color-text-muted); margin-top: 2px; }
+
+  .btn-new {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 6px 14px;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    font-family: var(--font-ui);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.1s;
+    flex-shrink: 0;
+  }
+  .btn-new:hover { border-color: var(--color-border-hover); color: var(--color-text-primary); }
 
   /* Error toast */
   .error-toast {
