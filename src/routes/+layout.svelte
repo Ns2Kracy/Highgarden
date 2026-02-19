@@ -4,10 +4,10 @@
   import Sidebar from '$lib/components/layout/Sidebar.svelte';
   import { onMount } from 'svelte';
   import { settings, defaults, markInitialized } from '$lib/stores/settings';
-  import { games } from '$lib/stores/games';
+  import { games, updateGame } from '$lib/stores/games';
   import { get } from 'svelte/store';
   import { invoke } from '@tauri-apps/api/core';
-  import type { AppSettings } from '$lib/types';
+  import type { AppSettings, GameId } from '$lib/types';
 
   let { children } = $props();
 
@@ -38,6 +38,23 @@
       console.warn('Failed to load config:', e);
     } finally {
       markInitialized();
+    }
+
+    // Background: check for updates for each installed game.
+    for (const g of get(games)) {
+      if (!g.installed || !g.installPath) continue;
+      invoke<{ localVersion: string | null; latestVersion: string | null; updateAvailable: boolean }>(
+        'check_game_update',
+        { gameId: g.id, installPath: g.installPath }
+      )
+        .then((r) => {
+          updateGame(g.id as GameId, {
+            version: r.localVersion ?? undefined,
+            latestVersion: r.latestVersion ?? undefined,
+            updateAvailable: r.updateAvailable,
+          });
+        })
+        .catch(() => {});
     }
   });
 </script>

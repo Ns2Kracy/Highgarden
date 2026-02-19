@@ -1,5 +1,5 @@
 use crate::config::{AppConfig, AppSettings};
-use crate::download::{DownloadManager, DownloadProgress, DownloadTask};
+use crate::download::{DownloadManager, DownloadProgress, DownloadStatus, DownloadTask};
 use crate::game::{self, GameManifest};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -85,7 +85,9 @@ pub async fn window_minimize(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn window_toggle_maximize(app: AppHandle) -> Result<(), String> {
     let win = app.get_webview_window("main").ok_or("no main window")?;
-    let is_max = win.is_maximized().map_err(|e: tauri::Error| e.to_string())?;
+    let is_max = win
+        .is_maximized()
+        .map_err(|e: tauri::Error| e.to_string())?;
     if is_max {
         win.unmaximize().map_err(|e: tauri::Error| e.to_string())
     } else {
@@ -116,8 +118,7 @@ pub async fn launch_game(
         return Err("游戏已在运行中".into());
     }
 
-    let exe_path = game::require_game_exe(&game_id, &install_path)
-        .map_err(|e| e.to_string())?;
+    let exe_path = game::require_game_exe(&game_id, &install_path).map_err(|e| e.to_string())?;
 
     let exe_name = exe_path
         .file_name()
@@ -154,7 +155,9 @@ async fn monitor_game(
         sys.refresh_processes(ProcessesToUpdate::All);
         for (pid, proc) in sys.processes() {
             let name = proc.name().to_string_lossy().to_lowercase();
-            if name == exe_name || name.trim_end_matches(".exe") == exe_name.trim_end_matches(".exe") {
+            if name == exe_name
+                || name.trim_end_matches(".exe") == exe_name.trim_end_matches(".exe")
+            {
                 game_pid = Some(*pid);
                 break;
             }
@@ -165,12 +168,28 @@ async fn monitor_game(
     }
 
     let Some(pid) = game_pid else {
-        let _ = app.emit("game:status", GameStatus { game_id, running: false });
+        let _ = app.emit(
+            "game:status",
+            GameStatus {
+                game_id,
+                running: false,
+            },
+        );
         return;
     };
 
-    state.write().await.running_games.insert(game_id.clone(), pid);
-    let _ = app.emit("game:status", GameStatus { game_id: game_id.clone(), running: true });
+    state
+        .write()
+        .await
+        .running_games
+        .insert(game_id.clone(), pid);
+    let _ = app.emit(
+        "game:status",
+        GameStatus {
+            game_id: game_id.clone(),
+            running: true,
+        },
+    );
 
     // Poll every 2 seconds until the process exits.
     // Use ProcessesToUpdate::All so the full PID list is re-enumerated;
@@ -184,7 +203,13 @@ async fn monitor_game(
         }
     }
 
-    let _ = app.emit("game:status", GameStatus { game_id: game_id.clone(), running: false });
+    let _ = app.emit(
+        "game:status",
+        GameStatus {
+            game_id: game_id.clone(),
+            running: false,
+        },
+    );
     state.write().await.running_games.remove(&game_id);
 }
 
@@ -232,7 +257,10 @@ pub async fn select_game_path(
     }
 
     let installed = game::check_game_installed(&game_id, &path_str);
-    Ok(Some(GamePathResult { path: path_str, installed }))
+    Ok(Some(GamePathResult {
+        path: path_str,
+        installed,
+    }))
 }
 
 #[tauri::command]
@@ -281,12 +309,19 @@ pub async fn start_game_install(
 
     log::info!(
         "[install] game={} packs={} dest={}",
-        game_id, manifest.packs.len(), dest_dir
+        game_id,
+        manifest.packs.len(),
+        dest_dir
     );
 
     for pack in &manifest.packs {
         let dest_path = format!("{}/{}", dest_dir.trim_end_matches('/'), pack.filename);
-        log::info!("[install] pack={} size={} dest={}", pack.filename, pack.size, dest_path);
+        log::info!(
+            "[install] pack={} size={} dest={}",
+            pack.filename,
+            pack.size,
+            dest_path
+        );
         let task_id = {
             let s = state.read().await;
             s.download_manager
@@ -295,7 +330,7 @@ pub async fn start_game_install(
                     pack.filename.clone(),
                     pack.url.clone(),
                     dest_path,
-                    Some(pack.size),       // known from manifest — skips HEAD
+                    Some(pack.size), // known from manifest — skips HEAD
                     None,
                     Some(pack.md5.clone()),
                 )
@@ -376,10 +411,7 @@ pub async fn cancel_download_task(
 /// Delete the hot-update cache directory for a game.
 /// Arknights / Endfield both store cached assets in `HotUpdate/`.
 #[tauri::command]
-pub async fn clear_game_cache(
-    game_id: String,
-    install_path: String,
-) -> Result<(), String> {
+pub async fn clear_game_cache(game_id: String, install_path: String) -> Result<(), String> {
     let cache_dirs: &[&str] = match game_id.as_str() {
         "arknights" | "endfield" => &["HotUpdate"],
         _ => return Err(format!("未知游戏：{}", game_id)),
@@ -394,5 +426,169 @@ pub async fn clear_game_cache(
                 .map_err(|e| format!("清除 {} 失败：{}", dir_name, e))?;
         }
     }
+    Ok(())
+}
+
+// ─── Version / update check ───────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckUpdateResult {
+    pub local_version: Option<String>,
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+}
+
+/// Compare the installed game version against the latest available on Hypergryph's CDN.
+#[tauri::command]
+pub async fn check_game_update(
+    game_id: String,
+    install_path: String,
+    state: State<'_, Arc<RwLock<AppState>>>,
+) -> Result<CheckUpdateResult, String> {
+    let local = game::read_local_version(&install_path);
+    let s = state.read().await;
+    let latest = game::fetch_latest_version(&game_id, &s.http_client)
+        .await
+        .map_err(|e| e.to_string())?;
+    let update_available = match (&local, &latest) {
+        (Some(l), Some(r)) => l != r,
+        _ => false,
+    };
+    Ok(CheckUpdateResult {
+        local_version: local,
+        latest_version: latest,
+        update_available,
+    })
+}
+
+/// Fetch the incremental patch manifest from the current version to the latest.
+/// Returns `None` if a patch is unavailable (clean install required).
+#[tauri::command]
+pub async fn fetch_update_manifest(
+    game_id: String,
+    current_version: String,
+    state: State<'_, Arc<RwLock<AppState>>>,
+) -> Result<Option<GameManifest>, String> {
+    let s = state.read().await;
+    game::fetch_patch_manifest(&game_id, &current_version, &s.http_client)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ─── ZIP extraction ───────────────────────────────────────────────────────────
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractionProgress {
+    pub game_id: String,
+    /// 1-based index of the pack just completed.
+    pub pack_index: usize,
+    pub total_packs: usize,
+    /// true when all packs are done.
+    pub done: bool,
+    pub error: Option<String>,
+}
+
+/// Extract all completed download packs for a game, then remove the zip files.
+/// Emits `extract:progress` events as each pack finishes.
+#[tauri::command]
+pub async fn extract_game_packs(
+    game_id: String,
+    app: AppHandle,
+    state: State<'_, Arc<RwLock<AppState>>>,
+) -> Result<(), String> {
+    let tasks: Vec<DownloadTask> = {
+        let s = state.read().await;
+        s.download_manager
+            .get_tasks()
+            .await
+            .into_iter()
+            .filter(|t| t.game_id == game_id && t.status == DownloadStatus::Completed)
+            .collect()
+    };
+
+    if tasks.is_empty() {
+        return Err("没有可解压的已完成下载".into());
+    }
+
+    let total_packs = tasks.len();
+    let game_id_clone = game_id.clone();
+
+    tokio::task::spawn_blocking(move || {
+        for (i, task) in tasks.iter().enumerate() {
+            let dest_dir = std::path::Path::new(&task.dest_path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            log::info!("[extract] {}/{} — {}", i + 1, total_packs, task.name);
+
+            match extract_zip_sync(&task.dest_path, &dest_dir) {
+                Ok(()) => {
+                    let _ = app.emit(
+                        "extract:progress",
+                        ExtractionProgress {
+                            game_id: game_id_clone.clone(),
+                            pack_index: i + 1,
+                            total_packs,
+                            done: i + 1 == total_packs,
+                            error: None,
+                        },
+                    );
+                }
+                Err(e) => {
+                    log::error!("[extract] failed {}: {}", task.name, e);
+                    let _ = app.emit(
+                        "extract:progress",
+                        ExtractionProgress {
+                            game_id: game_id_clone.clone(),
+                            pack_index: i + 1,
+                            total_packs,
+                            done: false,
+                            error: Some(e.to_string()),
+                        },
+                    );
+                    return Err(format!("解压 {} 失败：{}", task.name, e));
+                }
+            }
+        }
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| format!("解压线程崩溃：{e}"))??;
+
+    Ok(())
+}
+
+/// Synchronously extract a zip archive into `dest_dir` and delete the archive on success.
+fn extract_zip_sync(zip_path: &str, dest_dir: &str) -> anyhow::Result<()> {
+    use std::io;
+    use zip::ZipArchive;
+
+    let file = std::fs::File::open(zip_path)?;
+    let mut archive = ZipArchive::new(file)?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let out_path = match entry.enclosed_name() {
+            Some(p) => std::path::Path::new(dest_dir).join(p),
+            None => continue, // skip entries with unsafe paths
+        };
+
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path)?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut out_file = std::fs::File::create(&out_path)?;
+            io::copy(&mut entry, &mut out_file)?;
+        }
+    }
+
+    // Remove the zip to free space after successful extraction.
+    std::fs::remove_file(zip_path)?;
+    log::info!("[extract] removed {}", zip_path);
     Ok(())
 }

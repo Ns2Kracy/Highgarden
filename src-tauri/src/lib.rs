@@ -79,6 +79,11 @@ pub fn run() {
             cancel_download_task,
             // Cache
             clear_game_cache,
+            // Version / update
+            check_game_update,
+            fetch_update_manifest,
+            // Extraction
+            extract_game_packs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running highgarden");

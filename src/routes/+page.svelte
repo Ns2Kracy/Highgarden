@@ -12,7 +12,7 @@
   import type { GameId, DownloadTask, GameManifest, DownloadProgress, DownloadStatus } from '$lib/types';
 
   // ─── Per-game download state ───────────────────────────────────────────────
-  type DownloadPhase = 'idle' | 'fetching' | 'confirm' | 'downloading' | 'done' | 'launching' | 'playing';
+  type DownloadPhase = 'idle' | 'fetching' | 'confirm' | 'downloading' | 'extracting' | 'done' | 'launching' | 'playing';
 
   let phases = $state<Record<GameId, DownloadPhase>>({
     arknights: 'idle',
@@ -25,6 +25,10 @@
   let gameTaskIds = $state<Record<GameId, string[]>>({
     arknights: [],
     endfield: [],
+  });
+  let extractProgress = $state<Record<GameId, { index: number; total: number }>>({
+    arknights: { index: 0, total: 0 },
+    endfield: { index: 0, total: 0 },
   });
 
   // ─── Toast (error & info) ──────────────────────────────────────────────────
@@ -46,6 +50,7 @@
   // ─── Event listener ────────────────────────────────────────────────────────
   let unlisten: (() => void) | null = null;
   let unlistenStatus: (() => void) | null = null;
+  let unlistenExtract: (() => void) | null = null;
   onMount(async () => {
     // Restore persisted download state so the UI shows progress on restart.
     try {
@@ -53,14 +58,29 @@
       saved.forEach((t) => addTask(t));
 
       for (const gameId of ['arknights', 'endfield'] as GameId[]) {
-        const pending = saved.filter(
-          (t) => t.gameId === gameId && t.status !== 'completed' && t.status !== 'error'
-        );
+        const gameTasks = saved.filter((t) => t.gameId === gameId);
+        const pending = gameTasks.filter((t) => t.status !== 'completed' && t.status !== 'error');
+        const completed = gameTasks.filter((t) => t.status === 'completed');
+
         if (pending.length > 0) {
           gameTaskIds[gameId] = pending.map((t) => t.id);
           phases[gameId] = 'downloading';
-          // Select the game that has a pending download so the user sees it.
           selectedGameId.set(gameId);
+        } else if (completed.length > 0) {
+          const game = $games.find((g) => g.id === gameId);
+          if (!game?.installed) {
+            // All packs downloaded but not yet extracted — auto-start extraction.
+            gameTaskIds[gameId] = completed.map((t) => t.id);
+            phases[gameId] = 'extracting';
+            selectedGameId.set(gameId);
+            startExtraction(gameId);
+          } else {
+            // Already installed — clean up stale completed tasks.
+            for (const t of completed) {
+              await invoke('cancel_download_task', { taskId: t.id }).catch(() => {});
+              removeTask(t.id);
+            }
+          }
         }
       }
     } catch {}
@@ -78,8 +98,46 @@
         if (!ids.length) continue;
         const all = $downloadTasks.filter(t => ids.includes(t.id));
         if (all.length && all.every(t => t.status === 'completed')) {
-          phases[gameId] = 'done';
+          phases[gameId] = 'extracting';
+          startExtraction(gameId);
         }
+      }
+    });
+
+    unlistenExtract = await listen<{
+      gameId: GameId; packIndex: number; totalPacks: number; done: boolean; error: string | null;
+    }>('extract:progress', ({ payload }) => {
+      extractProgress[payload.gameId] = { index: payload.packIndex, total: payload.totalPacks };
+      if (payload.error) {
+        showError(`解压失败：${payload.error}`);
+        phases[payload.gameId] = 'downloading'; // revert so user can retry
+        return;
+      }
+      if (payload.done) {
+        // Extraction complete — update game install status and clear tasks.
+        const game = $games.find((g) => g.id === payload.gameId);
+        if (game) {
+          updateGame(payload.gameId, { installed: true });
+          // Fetch version now that files exist.
+          if (game.installPath) {
+            invoke<{ localVersion: string | null; latestVersion: string | null; updateAvailable: boolean }>(
+              'check_game_update',
+              { gameId: payload.gameId, installPath: game.installPath }
+            ).then((r) => {
+              updateGame(payload.gameId, {
+                version: r.localVersion ?? undefined,
+                latestVersion: r.latestVersion ?? undefined,
+                updateAvailable: r.updateAvailable,
+              });
+            }).catch(() => {});
+          }
+        }
+        gameTaskIds[payload.gameId].forEach((id) => {
+          invoke('cancel_download_task', { taskId: id }).catch(() => {});
+          removeTask(id);
+        });
+        gameTaskIds[payload.gameId] = [];
+        phases[payload.gameId] = 'done';
       }
     });
 
@@ -91,7 +149,7 @@
       }
     });
   });
-  onDestroy(() => { unlisten?.(); unlistenStatus?.(); });
+  onDestroy(() => { unlisten?.(); unlistenStatus?.(); unlistenExtract?.(); });
 
   // ─── Helpers ───────────────────────────────────────────────────────────────
   function formatSize(bytes: number): string {
@@ -140,9 +198,33 @@
     }
   }
 
+  async function startExtraction(gameId: GameId) {
+    extractProgress[gameId] = { index: 0, total: gameTaskIds[gameId].length };
+    try {
+      await invoke('extract_game_packs', { gameId });
+    } catch (e) {
+      showError(`解压失败：${e}`);
+      phases[gameId] = 'idle';
+    }
+  }
+
   async function fetchManifest(gameId: GameId) {
     phases[gameId] = 'fetching';
     try {
+      const game = $games.find((g) => g.id === gameId);
+      // If game is installed and we have a local version, try the incremental patch first.
+      if (game?.installed && game.version) {
+        const patch = await invoke<GameManifest | null>('fetch_update_manifest', {
+          gameId,
+          currentVersion: game.version,
+        });
+        if (patch) {
+          manifests[gameId] = patch;
+          phases[gameId] = 'confirm';
+          return;
+        }
+      }
+      // Fall back to full install manifest.
       manifests[gameId] = await invoke<GameManifest>('fetch_game_manifest', { gameId });
       phases[gameId] = 'confirm';
     } catch (e) {
@@ -509,12 +591,29 @@
               </div>
             </div>
 
+          <!-- EXTRACTING -->
+          {:else if phase === 'extracting'}
+            {@const ep = extractProgress[game.id]}
+            {@const epPct = ep.total > 0 ? Math.round((ep.index / ep.total) * 100) : 0}
+            <div class="download-panel">
+              <div class="dl-header">
+                <span class="dl-label">解压中</span>
+                <span class="dl-meta">{ep.index} / {ep.total} 个分包</span>
+              </div>
+              <div class="progress-bar">
+                <div class="progress-fill extract-fill" style="width: {epPct}%"></div>
+              </div>
+              <div class="dl-footer">
+                <span class="dl-pct">{epPct}%</span>
+              </div>
+            </div>
+
           <!-- DONE -->
           {:else if phase === 'done'}
             <div class="action-row">
               <div class="done-badge">
                 <CheckCircle2 size={16} />
-                <span>下载完成</span>
+                <span>安装完成</span>
               </div>
               <button class="btn btn-primary" onclick={() => launchGame(game.id, game.installPath)}>
                 <Play size={16} />
@@ -776,6 +875,7 @@
     transition: width 0.4s ease;
   }
   .progress-fill.fill-paused { background: var(--color-warning, #eab308); }
+  .progress-fill.extract-fill { background: var(--color-endfield-cyan, #06b6d4); }
 
   .dl-footer {
     display: flex;

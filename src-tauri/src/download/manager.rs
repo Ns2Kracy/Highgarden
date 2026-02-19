@@ -80,7 +80,11 @@ pub struct DownloadManager {
 
 impl DownloadManager {
     /// `max_concurrent` — how many files download simultaneously (e.g. 3).
-    pub fn new(max_concurrent: usize, proxy_url: Option<&str>, persist_path: Option<PathBuf>) -> Result<Self> {
+    pub fn new(
+        max_concurrent: usize,
+        proxy_url: Option<&str>,
+        persist_path: Option<PathBuf>,
+    ) -> Result<Self> {
         let mut builder = Client::builder()
             .user_agent("Mozilla/5.0 Highgarden/0.1.0")
             .tcp_keepalive(std::time::Duration::from_secs(30))
@@ -104,7 +108,9 @@ impl DownloadManager {
     /// Load tasks saved from the previous session. Called once at startup.
     /// Tasks that were actively "downloading" are reset to "paused".
     pub async fn load_persisted(&self) -> Result<()> {
-        let Some(path) = &self.persist_path else { return Ok(()); };
+        let Some(path) = &self.persist_path else {
+            return Ok(());
+        };
         if !path.exists() {
             return Ok(());
         }
@@ -112,7 +118,10 @@ impl DownloadManager {
         let saved: HashMap<String, DownloadTask> = serde_json::from_str(&raw).unwrap_or_default();
         let mut tasks = self.tasks.write().await;
         for (id, mut task) in saved {
-            if matches!(task.status, DownloadStatus::Downloading | DownloadStatus::Verifying) {
+            if matches!(
+                task.status,
+                DownloadStatus::Downloading | DownloadStatus::Verifying
+            ) {
                 task.status = DownloadStatus::Paused;
                 task.speed = 0;
             }
@@ -124,7 +133,9 @@ impl DownloadManager {
 
     /// Persist all non-completed tasks to disk.
     async fn persist(&self) {
-        let Some(path) = &self.persist_path else { return; };
+        let Some(path) = &self.persist_path else {
+            return;
+        };
         let tasks = self.tasks.read().await;
         let to_save: HashMap<&String, &DownloadTask> = tasks
             .iter()
@@ -167,7 +178,11 @@ impl DownloadManager {
                 .await
                 .context("HEAD request failed")?;
 
-            log::debug!("[dl] HEAD status={} headers={:?}", resp.status(), resp.headers());
+            log::debug!(
+                "[dl] HEAD status={} headers={:?}",
+                resp.status(),
+                resp.headers()
+            );
 
             let size = resp
                 .headers()
@@ -246,7 +261,9 @@ impl DownloadManager {
                 if on_disk > 0 && on_disk < task.total_size {
                     log::info!(
                         "[dl] resume: {} bytes already on disk for {} (total {})",
-                        on_disk, task.name, task.total_size
+                        on_disk,
+                        task.name,
+                        task.total_size
                     );
                     if let Some(c) = task.chunks.get_mut(0) {
                         c.downloaded = on_disk;
@@ -272,7 +289,10 @@ impl DownloadManager {
 
         log::info!(
             "[dl] start_task id={} name={} dest={} size={} resume_from={}",
-            task.id, task.name, task.dest_path, task.total_size,
+            task.id,
+            task.name,
+            task.dest_path,
+            task.total_size,
             task.chunks.first().map(|c| c.downloaded).unwrap_or(0)
         );
 
@@ -321,7 +341,9 @@ impl DownloadManager {
             if let Some(path) = &persist_path {
                 let to_save: HashMap<&String, &DownloadTask> = tasks_w
                     .iter()
-                    .filter(|(_, t)| !matches!(t.status, DownloadStatus::Completed | DownloadStatus::Error))
+                    .filter(|(_, t)| {
+                        !matches!(t.status, DownloadStatus::Completed | DownloadStatus::Error)
+                    })
                     .collect();
                 if let Ok(raw) = serde_json::to_string_pretty(&to_save) {
                     let _ = fs::write(path.as_ref(), raw).await;
@@ -342,10 +364,18 @@ impl DownloadManager {
     where
         F: Fn(DownloadProgress) + Send + Sync + 'static,
     {
-        let pending: Vec<_> = task.chunks.iter().filter(|c| !c.completed).cloned().collect();
+        let pending: Vec<_> = task
+            .chunks
+            .iter()
+            .filter(|c| !c.completed)
+            .cloned()
+            .collect();
         log::info!(
             "[dl] run_download task={} ({}) pending_chunks={}/{}",
-            task.id, task.name, pending.len(), task.chunks.len()
+            task.id,
+            task.name,
+            pending.len(),
+            task.chunks.len()
         );
 
         let on_progress = Arc::new(on_progress);
@@ -473,7 +503,9 @@ impl DownloadManager {
             .to_string();
         log::info!(
             "[dl] chunk {} response: status={} content-length={}",
-            chunk.id, resp_status, content_length
+            chunk.id,
+            resp_status,
+            content_length
         );
 
         let mut stream = response.bytes_stream();
@@ -481,6 +513,7 @@ impl DownloadManager {
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&dest_path)
             .await
             .with_context(|| format!("open file {} failed", dest_path))?;
@@ -597,10 +630,15 @@ impl DownloadManager {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn format_bytes(b: u64) -> String {
-    if b < 1024 { format!("{b}B") }
-    else if b < 1024 * 1024 { format!("{:.1}KB", b as f64 / 1024.0) }
-    else if b < 1024 * 1024 * 1024 { format!("{:.1}MB", b as f64 / 1024.0 / 1024.0) }
-    else { format!("{:.2}GB", b as f64 / 1024.0 / 1024.0 / 1024.0) }
+    if b < 1024 {
+        format!("{b}B")
+    } else if b < 1024 * 1024 {
+        format!("{:.1}KB", b as f64 / 1024.0)
+    } else if b < 1024 * 1024 * 1024 {
+        format!("{:.1}MB", b as f64 / 1024.0 / 1024.0)
+    } else {
+        format!("{:.2}GB", b as f64 / 1024.0 / 1024.0 / 1024.0)
+    }
 }
 
 // ─── Checksum verification ──────────────────────────────────────────────────

@@ -1,2 +1,2 @@
 pub mod manager;
-pub use manager::{DownloadManager, DownloadProgress, DownloadTask};
+pub use manager::{DownloadManager, DownloadProgress, DownloadStatus, DownloadTask};

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -28,7 +28,7 @@ const EXCLUDED_EXES: &[&str] = &[
 fn known_exe_names(game_id: &str) -> &'static [&'static str] {
     match game_id {
         "arknights" => &["Arknights.exe", "明日方舟.exe"],
-        "endfield"  => &["ArknightsEndfield.exe", "EndField.exe", "Endfield.exe"],
+        "endfield" => &["ArknightsEndfield.exe", "EndField.exe", "Endfield.exe"],
         _ => &[],
     }
 }
@@ -53,8 +53,7 @@ fn find_game_exe(game_id: &str, install_path: &str) -> Option<std::path::PathBuf
         .filter(|e| {
             let name = e.file_name();
             let lower = name.to_string_lossy().to_lowercase();
-            lower.ends_with(".exe")
-                && !EXCLUDED_EXES.iter().any(|ex| lower == *ex)
+            lower.ends_with(".exe") && !EXCLUDED_EXES.iter().any(|ex| lower == *ex)
         })
         .filter_map(|e| {
             let meta = e.metadata().ok()?;
@@ -78,14 +77,9 @@ pub fn check_game_installed(game_id: &str, install_path: &str) -> bool {
 
 /// Stricter check used before launching: returns the exe path or an error.
 pub fn require_game_exe(game_id: &str, install_path: &str) -> Result<std::path::PathBuf> {
-    find_game_exe(game_id, install_path).ok_or_else(|| {
-        anyhow::anyhow!(
-            "在 {} 中找不到 {} 可执行文件",
-            install_path, game_id
-        )
-    })
+    find_game_exe(game_id, install_path)
+        .ok_or_else(|| anyhow::anyhow!("在 {} 中找不到 {} 可执行文件", install_path, game_id))
 }
-
 
 // ─── Version API ─────────────────────────────────────────────────────────────
 
@@ -120,4 +114,14 @@ pub async fn fetch_latest_version(
 
     let data: AkVersionResponse = resp.json().await?;
     Ok(data.client_version.or(data.res_version))
+}
+
+/// Read the local client version from the game's `version` file.
+/// Arknights/Endfield store a JSON file at `{install_path}/version`
+/// with `clientVersion` (and/or `resVersion`) fields.
+pub fn read_local_version(install_path: &str) -> Option<String> {
+    let path = std::path::Path::new(install_path).join("version");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let v: AkVersionResponse = serde_json::from_str(&raw).ok()?;
+    v.client_version.or(v.res_version)
 }

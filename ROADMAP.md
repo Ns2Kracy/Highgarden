@@ -53,8 +53,8 @@ GET https://launcher.hypergryph.com/api/game/get_latest
 - [x] 启动时多 exe 候选检测
 - [x] 游戏启动（`tokio::process::Command`）
 - [x] 版本号获取（明日方舟 / 终末地均已接入）
-- [ ] 安装路径持久化（跨重启保存，tauri-plugin-store）
-- [ ] 本地版本与线上版本对比，自动检测更新
+- [x] 安装路径持久化（跨重启保存，tauri-plugin-store）
+- [x] 本地版本与线上版本对比，自动检测更新
 
 ### 下载引擎 ✅
 - [x] 多线程分片下载（Range 请求，默认 8 分片）
@@ -68,8 +68,8 @@ GET https://launcher.hypergryph.com/api/game/get_latest
 - [x] `start_game_install` — 为每个分包创建下载任务并并发下载
 - [x] 终末地 auth_key 签名 URL 支持（直接使用 API 返回的 URL）
 - [x] 下载管理页实时聚合进度（总进度条 + 分包列表）
-- [ ] 增量更新（patch 包，非全量重下）
-- [ ] 下载完成后 ZIP 解压安装
+- [x] 增量更新（patch 包，非全量重下）
+- [x] 下载完成后 ZIP 解压安装
 
 ---
 
@@ -102,5 +102,4 @@ GET https://launcher.hypergryph.com/api/game/get_latest
 
 | 项目 | 原因 | 优先级 |
 |------|------|--------|
-| ZIP 解压安装 | 36 个分包拼接后约 84 GB，需要可靠的流式解压方案 | 高 |
 | 寻访 API | 需分析游戏内嵌 H5 页面的请求方式 | 中 |
