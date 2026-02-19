@@ -561,6 +561,134 @@ pub async fn extract_game_packs(
     Ok(())
 }
 
+// ─── Gacha analysis ───────────────────────────────────────────────────────────
+
+use crate::gacha::GachaManager;
+
+#[tauri::command]
+pub async fn scan_gacha_url(
+    game_id: String,
+    install_path: String,
+    app: AppHandle,
+    state: State<'_, Arc<RwLock<AppState>>>,
+) -> Result<Option<String>, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let client = state.read().await.http_client.clone();
+    let mgr = GachaManager::new(data_dir, client);
+    Ok(mgr.scan_gacha_url(&game_id, &install_path))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchGachaResult {
+    pub uid: String,
+    pub total: usize,
+}
+
+#[tauri::command]
+pub async fn fetch_gacha_records(
+    game_id: String,
+    url: String,
+    app: AppHandle,
+    state: State<'_, Arc<RwLock<AppState>>>,
+) -> Result<FetchGachaResult, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let client = state.read().await.http_client.clone();
+    let mgr = GachaManager::new(data_dir, client);
+
+    let (uid, records) = mgr
+        .fetch_all_records(&game_id, &url)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let total = records.len();
+    let fetched_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let data = crate::gacha::GachaData {
+        uid: uid.clone(),
+        game_id,
+        records,
+        fetched_at,
+    };
+
+    mgr.save_data(&data).map_err(|e| e.to_string())?;
+    Ok(FetchGachaResult { uid, total })
+}
+
+#[tauri::command]
+pub async fn get_local_gacha_records(
+    game_id: String,
+    app: AppHandle,
+    state: State<'_, Arc<RwLock<AppState>>>,
+) -> Result<Option<crate::gacha::GachaData>, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let client = state.read().await.http_client.clone();
+    let mgr = GachaManager::new(data_dir, client);
+    Ok(mgr.load_data(&game_id))
+}
+
+#[tauri::command]
+pub async fn get_gacha_stats(
+    game_id: String,
+    app: AppHandle,
+    state: State<'_, Arc<RwLock<AppState>>>,
+) -> Result<Option<crate::gacha::GachaStatsResult>, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let client = state.read().await.http_client.clone();
+    let mgr = GachaManager::new(data_dir, client);
+    Ok(mgr.load_data(&game_id).map(|d| GachaManager::compute_stats(&d)))
+}
+
+#[tauri::command]
+pub async fn export_gacha_records(
+    game_id: String,
+    format: String,
+    dest_path: String,
+    app: AppHandle,
+    state: State<'_, Arc<RwLock<AppState>>>,
+) -> Result<(), String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let client = state.read().await.http_client.clone();
+    let mgr = GachaManager::new(data_dir, client);
+
+    let data = mgr
+        .load_data(&game_id)
+        .ok_or_else(|| "没有可导出的记录".to_string())?;
+
+    match format.as_str() {
+        "json" => GachaManager::export_json(&data.records, &dest_path).map_err(|e| e.to_string()),
+        "csv" => GachaManager::export_csv(&data.records, &dest_path).map_err(|e| e.to_string()),
+        "xlsx" => {
+            GachaManager::export_xlsx(&data.records, &dest_path).map_err(|e| e.to_string())
+        }
+        _ => Err(format!("不支持的导出格式：{format}")),
+    }
+}
+
+#[tauri::command]
+pub async fn select_gacha_export_path(
+    app: AppHandle,
+    format: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (extension, desc): (&str, &str) = match format.as_str() {
+        "json" => ("json", "JSON 文件"),
+        "csv" => ("csv", "CSV 文件"),
+        "xlsx" => ("xlsx", "Excel 文件"),
+        _ => return Err(format!("未知格式：{format}")),
+    };
+    let path = app
+        .dialog()
+        .file()
+        .set_title(format!("导出寻访记录为 {}", desc.to_uppercase()))
+        .add_filter(desc, &[extension])
+        .blocking_save_file();
+    Ok(path.map(|p| p.to_string()))
+}
+
 /// Synchronously extract a zip archive into `dest_dir` and delete the archive on success.
 fn extract_zip_sync(zip_path: &str, dest_dir: &str) -> anyhow::Result<()> {
     use std::io;

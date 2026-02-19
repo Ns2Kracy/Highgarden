@@ -73,18 +73,18 @@ GET https://launcher.hypergryph.com/api/game/get_latest
 
 ---
 
-## Phase 3 — 寻访分析
+## Phase 3 — 寻访分析 ✅
 
-- [ ] **数据获取方式调研**（游戏内嵌 H5 的 API URL）
-- [ ] 寻访记录拉取与本地存储
-- [ ] 统计分析
-  - [ ] 六星出货率 / 当前 pity 计数
-  - [ ] 各期卡池分析
-  - [ ] 历史趋势图
-- [ ] 导出
-  - [ ] Excel（`.xlsx`）
-  - [ ] CSV
-  - [ ] JSON
+- [x] **数据获取方式调研**（游戏内嵌 H5 的 API URL）
+- [x] 寻访记录拉取与本地存储
+- [x] 统计分析
+  - [x] 六星出货率 / 当前 pity 计数
+  - [x] 各期卡池分析
+  - [x] 历史趋势图
+- [x] 导出
+  - [x] Excel（`.xlsx`）
+  - [x] CSV
+  - [x] JSON
 
 ---
 

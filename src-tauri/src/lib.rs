@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod download;
+mod gacha;
 mod game;
 
 use commands::{AppState, *};
@@ -84,6 +85,13 @@ pub fn run() {
             fetch_update_manifest,
             // Extraction
             extract_game_packs,
+            // Gacha analysis
+            scan_gacha_url,
+            fetch_gacha_records,
+            get_local_gacha_records,
+            get_gacha_stats,
+            export_gacha_records,
+            select_gacha_export_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running highgarden");
